@@ -17,7 +17,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from . import __version__, dashboard
 from .consolidar import ERROS, GLOSSARIO, categoria, consolidar, nome_evento
-from .cripto import ctx_alvo, decifrar
+from .chaves import alvo as alvo_de
 from .db import SNAPSHOTS_DA_INVESTIGACAO, conectar, trilha
 from .identificador import mascarar_texto
 from .manifesto import assinar_manifesto, linhas_eventos, sha256
@@ -84,7 +84,7 @@ def _aba(wb, nome, cab, linhas, larguras=None, aviso=None, fmt_data=(), num=()):
 def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False) -> dict:
     with conectar() as cx:
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
-    dig = decifrar(inv["alvo_cifrado"], ctx_alvo(inv["alvo_hmac"]))
+    dig = alvo_de(inv, "exportar")
     tz = ZoneInfo(inv["fuso"])
     msk = (lambda s: s) if sem_mascara else (lambda s: mascarar_texto(s, inv["tipo"], dig))
     d = consolidar(inv_id)

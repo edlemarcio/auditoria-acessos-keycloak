@@ -12,7 +12,7 @@ import httpx
 from psycopg.types.json import Jsonb
 
 from . import __version__
-from .cripto import ctx_segredo, decifrar
+from . import chaves
 from .db import conectar
 
 
@@ -99,11 +99,12 @@ _ORC_LOCK = threading.Lock()
 class ClienteKC:
     TENTATIVAS = 6
 
-    def __init__(self, instancia: dict, investigacao_id: int | None = None, registrar: bool = True):
+    def __init__(self, instancia: dict, investigacao_id: int | None = None, registrar: bool = True,
+                 finalidade: str | None = None):
         self.inst = instancia
         self.investigacao_id = investigacao_id
         self.registrar = registrar
-        self.segredo = decifrar(instancia["segredo_cifrado"], ctx_segredo(instancia["nome"]))
+        self.segredo = chaves.segredo(instancia, finalidade or ("coleta" if investigacao_id else "sondas"))
         verify = instancia.get("ca_path") or True
         self.http = httpx.Client(base_url=instancia["url"].rstrip("/"), timeout=30.0, verify=verify,
                                  trust_env=False)

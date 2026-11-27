@@ -132,6 +132,55 @@ def migrar_chaves(cx) -> dict:
     return feitos
 
 
+# ------------------------------------------------------------------ formato v3: DEK por investigação (W0b)
+# b"\x03" + nonce(12) + cifrado, AES-256-GCM com a DEK da investigação. AAD = investigação | tabela | coluna |
+# chave da linha | classe da DEK (§5.3): trocar uma célula de linha, de coluna ou de investigação faz a decifração
+# falhar.
+V3 = b"\x03"
+FINALIDADE_KEK_LOCAL = b"kc-auditor/kek-local/v1"
+LOCAL_V1 = b"local:v1:"
+
+
+def aad(inv_id: int, tabela: str, coluna: str, linha, classe: str = "principal") -> bytes:
+    return f"kc-auditor/v3|{inv_id}|{tabela}|{coluna}|{linha}|{classe}".encode()
+
+
+def cifrar_dek(dek: bytes, dados: bytes | str, aad_: bytes) -> bytes:
+    if isinstance(dados, str):
+        dados = dados.encode()
+    nonce = os.urandom(12)
+    return V3 + nonce + AESGCM(dek).encrypt(nonce, dados, aad_)
+
+
+def decifrar_dek(dek: bytes, blob: bytes, aad_: bytes) -> bytes:
+    blob = bytes(blob)
+    if blob[:1] != V3:
+        raise ValueError("cifrado fora do formato v3")
+    return AESGCM(dek).decrypt(blob[1:13], blob[13:], aad_)
+
+
+def chave_pseudo(dek: bytes, inv_id: int, classe: str) -> bytes:
+    """K_pseudo da investigação por classe de pseudônimo (§5.3): morre com a DEK."""
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=str(inv_id).encode(),
+                info=f"kc-auditor/pseudo/v1/{classe}".encode()).derive(dek)
+
+
+def envolver_local(dek: bytes, inv_id: int, classe: str) -> bytes:
+    """Modo local: a DEK é envolvida por uma KEK derivada de AUDITOR_CHAVE (no modo vault, pelo Transit)."""
+    nonce = os.urandom(12)
+    return LOCAL_V1 + nonce + AESGCM(_chave(FINALIDADE_KEK_LOCAL)).encrypt(
+        nonce, dek, f"kc-auditor/kek|{inv_id}|{classe}".encode())
+
+
+def desenvolver_local(envelope: bytes, inv_id: int, classe: str) -> bytes:
+    e = bytes(envelope)
+    if not e.startswith(LOCAL_V1):
+        raise RuntimeError("DEK envolvida pelo Vault: use AUDITOR_MODO=vault (o modo local não abre envelopes do "
+                           "Vault)")
+    e = e[len(LOCAL_V1):]
+    return AESGCM(_chave(FINALIDADE_KEK_LOCAL)).decrypt(e[:12], e[12:], f"kc-auditor/kek|{inv_id}|{classe}".encode())
+
+
 def gerar_chaves(destino: Path) -> tuple[str, Path]:
     destino.mkdir(parents=True, exist_ok=True)
     priv = Ed25519PrivateKey.generate()

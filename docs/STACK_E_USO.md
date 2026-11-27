@@ -185,6 +185,55 @@ contagem id a id, e cancelamento:
 AUDITOR_DSN=<kc_auditor_app> KC_DSN_kc26=... KC_DSN_kc18=... python tests/fila.py 20
 ```
 
+## Chaves por investigação e modo vault (etapa W0b)
+
+Desde a W0b cada investigação tem duas chaves de dados próprias (DEKs): a principal e a de terceiros. Elas ficam
+guardadas envolvidas na tabela `chave_investigacao`, e o alvo passa a ser cifrado com a DEK principal (formato v3,
+com AAD por linha). Há dois modos, escolhidos por `AUDITOR_MODO`:
+
+| Modo | Para quê | De onde vêm as chaves |
+| --- | --- | --- |
+| `local` (padrão) | Desenvolvimento e teste | De `AUDITOR_CHAVE`, como antes. A DEK é envolvida por uma KEK derivada dela. Com `AUDITOR_AMBIENTE=producao`, recusa rodar |
+| `vault` | Igual à produção | Do `chaveiro`, por mTLS. O processo não tem chave nenhuma. Sem `chaveiro`, falha e nunca recorre ao modo local |
+
+No modo local, o `init` cria as DEKs das investigações antigas e recifra o alvo (idempotente).
+
+**Subir o modo vault na stack local.** O Vault entra no perfil `vault` do compose, e o `vault_setup.py` faz o papel
+do Operador do Vault. Ele inicializa o cofre, cria a KEK e as chaves de uso no Transit, as políticas, os tokens do
+`chaveiro` e do `assinador`, e os certificados mTLS no PKI. Tudo vai para `chaves/vault/` e `chaves/servicos/`, fora
+do git:
+
+```bash
+docker compose -f infra/docker-compose.yml --profile vault up -d vault
+python infra/vault_setup.py                    # idempotente; --certificados só reemite os certificados (7 dias)
+psql <dono>/auditor -v senha_app="'...'" -v senha_chaveiro="'...'" -f infra/papeis.sql   # cria kc_chaveiro
+CHAVEIRO_DSN=postgresql://kc_chaveiro:...@localhost:5435/auditor python -m auditor chaveiro &   # porta 8443
+export AUDITOR_MODO=vault
+```
+
+Os segredos dos service accounts são cifrados pelo Vault, então instâncias cadastradas no modo local precisam ser
+recadastradas (`instancia-add`) no modo vault. O mais simples é usar um banco separado para o modo vault.
+
+**Quem recebe o quê.** A identidade é o CN do certificado. O `worker` recebe a DEK só para coletar uma investigação
+em `coletando`, ou para preparar e fechar quando o job está em execução. `pacotes` recebe para exportar, depois da
+conclusão. `operador` (a CLI, até a API da W1) só cria as DEKs na abertura, calcula o HMAC do alvo e cifra segredos.
+`api` é recusado até a W1, porque exige o token OIDC. Cada entrega e cada recusa vão para a trilha e para o SIEM
+(`AUDITOR_SIEM`, padrão `logs/siem.jsonl`), e volume fora do padrão gera alerta. No modo vault, `investigar` e
+`retomar` vão sempre para a fila do worker. A identidade padrão é `worker` para o comando `worker`, `pacotes` para
+`exportar` e `operador` para o resto. `AUDITOR_IDENTIDADE` troca essa escolha.
+
+**Teste de aceite do chaveiro** (banco próprio, `auditor_w0b`):
+
+```bash
+AUDITOR_DSN=<kc_auditor_app>/auditor_w0b CHAVEIRO_DSN=<kc_chaveiro>/auditor_w0b KC_DSN_kc26=... KC_DSN_kc18=... \
+  AUDITOR_CHAVE_ED25519=chaves/assinatura.pem python tests/chaveiro.py 10
+```
+
+O teste confere que os segredos e as DEKs só ficam envolvidos pelo Vault. Também confere a recusa ao worker fora da
+coleta, com trilha e alerta, e as recusas por identidade e finalidade. Verifica que conexão sem certificado ou com
+certificado de outra AC não passa, que o fluxo completo pelo worker e a exportação por `pacotes` funcionam (com
+contagem id a id), que o processo falha fechado e que o SIEM não traz DEK, segredo nem alvo.
+
 ## Acessos da stack de teste
 
 | O quê | Endereço | Usuário | Senha |

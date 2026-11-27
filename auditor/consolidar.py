@@ -56,7 +56,7 @@ def extras_conta(inv_id: int):
         try:
             for c in contas:
                 inst = insts[c["instancia_id"]]
-                cli = clis.setdefault(inst["id"], ClienteKC(inst, inv_id))
+                cli = clis.setdefault(inst["id"], ClienteKC(inst, inv_id, finalidade="fechar"))
                 d1 = datetime.fromtimestamp(inv["inicio_ms"] / 1000, timezone.utc).strftime("%Y-%m-%d")
                 for tipo, caminho, params in (
                         ("sessao", f"/admin/realms/{c['realm']}/users/{c['user_id']}/sessions", None),

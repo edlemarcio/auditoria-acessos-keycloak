@@ -290,8 +290,8 @@ def executar_tarefa(cx, t: dict, clientes: Clientes) -> str:
     expiracao = ((snap or {}).get("config") or {}).get("eventsExpiration")
     alvo = None
     if inv["parametros"].get("varredura"):
-        from .cripto import ctx_alvo, decifrar
-        alvo = (inv["tipo"], decifrar(inv["alvo_cifrado"], ctx_alvo(inv["alvo_hmac"])))
+        from .chaves import alvo as alvo_de
+        alvo = (inv["tipo"], alvo_de(inv, "coleta"))
     col = Coletor(cx, clientes.de(inst, inv["id"]), inv, conta, t, inst, alvo)
     try:
         col.rodar()

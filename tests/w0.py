@@ -23,7 +23,7 @@ from psycopg.rows import dict_row
 
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))
-from auditor import cripto  # noqa: E402
+from auditor import chaves, cripto  # noqa: E402
 from auditor.identificador import variantes  # noqa: E402
 
 DSN = os.environ["AUDITOR_DSN"]
@@ -53,7 +53,7 @@ def verificar(zp: Path) -> bool:
 def main(inv: int):
     cx = psycopg.connect(DSN, autocommit=True, row_factory=dict_row)
     i = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv,)).fetchone()
-    dig = cripto.decifrar(i["alvo_cifrado"], cripto.ctx_alvo(i["alvo_hmac"]))
+    dig = chaves.alvo(i, "exportar")
     user_ids = [r["user_id"] for r in cx.execute(
         "SELECT user_id FROM conta WHERE investigacao_id=%s AND user_id IS NOT NULL", (inv,))]
     tmp = Path(tempfile.mkdtemp(prefix="w0_"))
@@ -117,12 +117,13 @@ def main(inv: int):
                f"{len(m['snapshots'])} no manifesto, {janela} na janela, {outros} no total")
 
     # ---- D4
-    checar(bytes(i["alvo_cifrado"])[:1] == cripto.V2 and
-           cripto.versao(i["alvo_cifrado"], cripto.ctx_alvo(i["alvo_hmac"])) == 2, "D4 alvo no formato v2")
+    # a partir da W0b o alvo fica cifrado com a DEK da investigação (formato v3, AAD por linha)
+    checar(bytes(i["alvo_cifrado"])[:1] == cripto.V3, "D4 alvo cifrado com a DEK da investigação (v3)")
     checar(i["alvo_hmac"] == cripto.hmac_alvo(i["tipo"], dig) != cripto.hmac_alvo_v1(i["tipo"], dig),
            "D4 HMAC do alvo com chave derivada (diferente da chave de cifra)")
     try:
-        cripto.decifrar(i["alvo_cifrado"], cripto.ctx_segredo("kc26"))
+        cripto.decifrar_dek(chaves.dek(i["id"], "exportar"), i["alvo_cifrado"],
+                            cripto.aad(i["id"], "investigacao", "alvo_cifrado", i["id"] + 1))
         trocado = False
     except Exception:  # noqa: BLE001
         trocado = True

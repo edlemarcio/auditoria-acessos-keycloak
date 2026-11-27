@@ -7,6 +7,7 @@
 #
 #   docker compose up -d                     # kc26 + kc18 + bancos
 #   docker compose --profile rhsso up -d     # inclui o RH-SSO oficial
+#   docker compose --profile vault up -d vault   # Vault (Transit + PKI) para o modo vault; depois infra/vault_setup.py
 #
 # Os bancos expõem portas para o gerador de eventos (tools/gerar_eventos.py) gravar direto na EVENT_ENTITY.
 name: kc-auditor
@@ -96,7 +97,26 @@ services:
     ports: ["5435:5432"]
     volumes: [pg-auditor:/var/lib/postgresql/data]
 
+  # Vault (W0b): KEK e chaves de uso no Transit, certificados mTLS do chaveiro no PKI. Só o chaveiro e o assinador
+  # recebem token de uso de chave (infra/vault_setup.py).
+  vault:
+    profiles: [vault]
+    image: hashicorp/vault:1.18.3
+    command: server
+    environment:
+      SKIP_SETCAP: "true"
+      # um nó, armazenamento em arquivo, listener sem TLS (só rede do Docker e porta local).
+      # Produção: cluster de 3 nós (Raft), TLS no listener e auto-unseal (§11 da PROPOSTA_WEB)
+      VAULT_LOCAL_CONFIG: >-
+        {"storage": {"file": {"path": "/vault/file"}},
+         "listener": {"tcp": {"address": "0.0.0.0:8200", "tls_disable": true}},
+         "disable_mlock": true, "api_addr": "http://127.0.0.1:8200", "ui": true}
+    ports: ["8200:8200"]
+    volumes:
+      - vault:/vault/file
+
 volumes:
+  vault: {}
   pg-kc26: {}
   pg-kc18: {}
   pg-auditor: {}

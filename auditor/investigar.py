@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Jsonb
 
 from . import coleta, descoberta
-from .cripto import cifrar, ctx_alvo, decifrar, hmac_alvo
+from . import chaves
 from .db import SNAPSHOTS_DA_INVESTIGACAO, conectar, trilha
 from .identificador import mascarar, normalizar
 from .kc import ClienteKC
@@ -29,15 +29,18 @@ def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str,
         fim_ += DIA_MS
     if fim_ <= ini:
         raise ValueError("Período inválido")
-    h = hmac_alvo(tipo, dig)
+    h = chaves.hmac_alvo(tipo, dig)
     with conectar() as cx:
+        # 'abrindo' até a DEK existir: o chaveiro só cria DEK de investigação em abertura e o alvo é cifrado com ela
         r = cx.execute("INSERT INTO investigacao (operador, justificativa, tipo, alvo_cifrado, alvo_hmac, "
-                       "alvo_mascarado, inicio_ms, fim_ms, fuso, granularidade, parametros, execucao_anterior) "
-                       "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-                       (operador, justificativa, tipo, cifrar(dig, ctx_alvo(h)), h, mascarar(tipo, dig),
-                        ini, fim_, fuso, granularidade,
+                       "alvo_mascarado, inicio_ms, fim_ms, fuso, granularidade, parametros, execucao_anterior, status) "
+                       "VALUES (%s,%s,%s,''::bytea,%s,%s,%s,%s,%s,%s,%s,%s,'abrindo') RETURNING id",
+                       (operador, justificativa, tipo, h, mascarar(tipo, dig), ini, fim_, fuso, granularidade,
                         Jsonb({"instancias": instancias, "varredura": varredura, "base_dias": base_dias}),
                         anterior)).fetchone()
+        dek = chaves.criar_deks(cx, r["id"])
+        cx.execute("UPDATE investigacao SET alvo_cifrado=%s, status='na_fila' WHERE id=%s",
+                   (chaves.cifrar_alvo(r["id"], dek, dig), r["id"]))
         trilha(cx, operador, "abrir_investigacao", r["id"], tipo=tipo, alvo=mascarar(tipo, dig),
                justificativa=justificativa, inicio=inicio, fim=fim)
         return r["id"]
@@ -47,14 +50,14 @@ def preparar(inv_id: int, contas_informadas: list[tuple[str, str, str]] | None =
     """Descoberta, localização (atributo, username, histórico), quadro de contas e plano de tarefas."""
     with conectar() as cx:
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
-        dig = decifrar(inv["alvo_cifrado"], ctx_alvo(inv["alvo_hmac"]))
+        dig = chaves.alvo(inv, "preparar")
         nomes = inv["parametros"].get("instancias")
         insts = [i for i in cx.execute("SELECT * FROM instancia ORDER BY id").fetchall()
                  if not nomes or i["nome"] in nomes]
         resumo = {"instancias": {}, "contas": 0}
         snaps = {}
         for inst in insts:
-            cli = ClienteKC(inst, inv_id)
+            cli = ClienteKC(inst, inv_id, finalidade="preparar")
             try:
                 realms = descoberta.descobrir(cx, inst, cli, inv_id)
                 for s in realms:

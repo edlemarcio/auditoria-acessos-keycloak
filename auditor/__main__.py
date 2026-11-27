@@ -12,11 +12,17 @@
   python -m auditor cancelar --id N --operador X --motivo "..."
   python -m auditor exportar --id N --saida d/  gera XLSX, CSV, dashboard HTML e manifesto assinado
   python -m auditor verificar pacote.zip --chave-publica chaves/assinatura.pub.pem
+  python -m auditor chaveiro [--porta 8443]     porteiro das chaves no modo vault (CHAVEIRO_DSN, token do Vault)
+
+Modo de chaves (AUDITOR_MODO): local (padrão, AUDITOR_CHAVE) ou vault (pelo chaveiro, por mTLS). No modo vault a
+identidade do processo é o certificado de chaves/servicos/: `worker` para o worker, `pacotes` para exportar e
+`operador` para o resto (AUDITOR_IDENTIDADE muda). Investigar e retomar passam a usar sempre a fila do worker.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -24,17 +30,21 @@ from pathlib import Path
 
 from psycopg.types.json import Jsonb
 
-from . import coleta, investigar, servicos
+from . import chaves, coleta, investigar, servicos
 from .db import conectar, criar_esquema, trilha
 
 
 def cmd_init(a):
     feitos = criar_esquema()
     print("esquema ok")
-    if feitos is None:
+    if feitos is None and chaves.modo() == "vault":
+        print("modo vault: as chaves das investigações novas ficam no Vault (conversões do modo local não se aplicam)")
+    elif feitos is None:
         print("chaves: AUDITOR_CHAVE não definida; conversão para o formato v2 não verificada")
-    elif any(feitos.values()):
+    elif any(v for k, v in feitos.items() if k != "deks"):
         print(f"chaves convertidas para o formato v2: {feitos}")
+    if feitos and feitos.get("deks"):
+        print(f"DEKs criadas para {feitos['deks']} investigação(ões) anteriores à W0b (alvo recifrado)")
 
 
 def cmd_chave(a):
@@ -45,7 +55,6 @@ def cmd_chave(a):
 
 
 def cmd_instancia_add(a):
-    from .cripto import cifrar, ctx_segredo
     from .descoberta import descobrir
     from .kc import ClienteKC
     from . import sondas
@@ -57,7 +66,7 @@ def cmd_instancia_add(a):
             "client_id=EXCLUDED.client_id, segredo_cifrado=EXCLUDED.segredo_cifrado, concorrencia=EXCLUDED.concorrencia,"
             " req_por_s=EXCLUDED.req_por_s, realms_esperados=EXCLUDED.realms_esperados, "
             "realm_homologacao=EXCLUDED.realm_homologacao, usuario_sonda=EXCLUDED.usuario_sonda RETURNING *",
-            (a.nome, a.url, a.realm_auth, a.client_id, cifrar(a.segredo, ctx_segredo(a.nome)), a.ca, a.concorrencia, a.req_por_s,
+            (a.nome, a.url, a.realm_auth, a.client_id, chaves.cifrar_segredo(a.nome, a.segredo), a.ca, a.concorrencia, a.req_por_s,
              a.versao, a.realms_esperados.split(",") if a.realms_esperados else [], a.homologacao, a.sonda)
         ).fetchone()
         trilha(cx, a.operador, "cadastrar_instancia", nome=a.nome, url=a.url)
@@ -115,7 +124,7 @@ def cmd_investigar(a):
                               a.instancias.split(",") if a.instancias else None, a.varredura, a.base_dias)
     print(f"investigação {inv_id}")
     contas = [tuple(c.split(":", 2)) for c in a.conta or []]
-    if a.fila:   # o worker prepara e coleta (python -m auditor worker)
+    if a.fila or chaves.modo() == "vault":   # o worker prepara e coleta (python -m auditor worker)
         servicos.enfileirar(inv_id, a.operador, contas)
         print("na fila do worker")
         return
@@ -147,7 +156,7 @@ def cmd_retomar(a):
         servicos.retomar(a.id, a.operador)
     except servicos.TransicaoInvalida as e:
         sys.exit(str(e))
-    if a.fila:
+    if a.fila or chaves.modo() == "vault":
         print("retomada; o worker continua a coleta")
         return
     _coletar(a.id, a.threads)
@@ -192,6 +201,11 @@ def cmd_verificar(a):
     sys.exit(0 if ok else 1)
 
 
+def cmd_chaveiro(a):
+    from .chaveiro import servir
+    servir(a.porta, Path(a.certs))
+
+
 def main():
     ap = argparse.ArgumentParser(prog="auditor")
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -234,7 +248,11 @@ def main():
     p.add_argument("--sem-mascara", action="store_true"); p.set_defaults(f=cmd_exportar)
     p = sp.add_parser("verificar"); p.add_argument("pacote"); p.add_argument("--chave-publica", required=True)
     p.set_defaults(f=cmd_verificar)
+    p = sp.add_parser("chaveiro"); p.add_argument("--porta", type=int, default=8443)
+    p.add_argument("--certs", default="chaves/servicos"); p.set_defaults(f=cmd_chaveiro)
     a = ap.parse_args()
+    # identidade mTLS do processo no modo vault (produção: cada host só tem o próprio certificado)
+    os.environ.setdefault("AUDITOR_IDENTIDADE", {"worker": "worker", "exportar": "pacotes"}.get(a.cmd, "operador"))
     a.f(a)
 
 

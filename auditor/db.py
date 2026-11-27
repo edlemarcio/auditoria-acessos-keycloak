@@ -41,10 +41,13 @@ def criar_esquema() -> dict | None:
     import os
     migrar_esquema()
     with conectar() as cx:
-        if not os.environ.get("AUDITOR_CHAVE"):
+        if os.environ.get("AUDITOR_MODO", "local") != "local" or not os.environ.get("AUDITOR_CHAVE"):
             return None   # sem chave não há o que migrar (instalação nova ou só esquema)
+        from .chaves import migrar_deks
         from .cripto import migrar_chaves
-        return migrar_chaves(cx)
+        feitos = migrar_chaves(cx)
+        feitos["deks"] = migrar_deks(cx)
+        return feitos
 
 
 def trilha(cx, operador: str, acao: str, investigacao_id: int | None = None, **detalhe):
