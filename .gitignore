@@ -10,3 +10,10 @@ logs/
 __pycache__/
 *.pyc
 .venv/
+# telas (web/)
+web/node_modules/
+web/dist/
+web/playwright-report/
+web/test-results/
+web/blob-report/
+web/playwright/.cache/

@@ -432,6 +432,26 @@ O teste cobre:
   (`casos.alerta_papel` já existe; falta o vigia dos eventos administrativos), documento de origem anexado e telas
   (W2).
 
+## W2 (telas)
+
+A interface web fica em `web/` (React 19 + TypeScript + Vite, gov.br DS, tema claro e escuro). Detalhes em
+[`web/README.md`](../web/README.md); contrato com o servidor em [`W2_CONTRATO.md`](W2_CONTRATO.md).
+
+```bash
+cd web && source ~/.nvm/nvm.sh && npm ci
+npm run dev:dubles     # :5173 com dublês do contrato, sem servidor (perfil pelo cookie dubles_perfil)
+npm run dev            # :5173 com proxy de /api e /auth para a API em :8100 (AUDITOR_API_URL=http://localhost:5173)
+npm test               # Vitest
+npm run e2e            # Playwright + axe (claro e escuro) e jornadas só com teclado, contra os dublês
+npm run e2e:real       # login real (senha + OTP) no realm auditor até o Início e a lista; API do W1 em :8100
+npm run build          # web/dist, servido pela API na mesma origem (contrato §14)
+```
+
+Telas: Início por perfil, Investigações (visões, busca, filtros, paginação, ações só de `acoes`), Nova solicitação
+(assistente de 5 passos, preservação urgente, rascunho, pedido externo), Resumo com linha do tempo e Acompanhamento ao
+vivo (SSE), Aprovações e tela de decisão, Pacotes, Administração, Perfis e acessos, Trilha global, "Você não tem
+acesso" e os estados de tela do §7.12. Capturas (dados dos dublês) em [`capturas/w2/`](capturas/w2/).
+
 ## Acessos da stack de teste
 
 | O quê | Endereço | Usuário | Senha |
