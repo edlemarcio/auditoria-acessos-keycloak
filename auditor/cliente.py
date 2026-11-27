@@ -9,6 +9,8 @@ as mesmas regras da web.
   python -m auditor pedir --cpf ... --de ... --ate ... --justificativa "..."
   python -m auditor aprovar --id 3 --investigador maria --motivo "..."
   python -m auditor exportar --id 3 --saida d/   # pede o pacote, espera o worker e baixa
+  python -m auditor inicio | notificacoes [--nao-lidas] | acompanhar --id 3     # W2
+  python -m auditor pedir --orgao ... --arquivo oficio.pdf ...   # externo: rascunho, documento e envio
 
 O token fica em ~/.config/kc-auditor/sessao.json (permissão 600), válido só para este dispositivo.
 """
@@ -56,20 +58,34 @@ def _token() -> str:
             sys.exit("Sessão expirada. Rode: python -m auditor login")
 
 
-def api(metodo: str, caminho: str, corpo: dict | None = None, bruto: bool = False):
+def api(metodo: str, caminho: str, corpo: dict | None = None, bruto: bool = False, arquivos: dict | None = None):
     base = os.environ.get("AUDITOR_API", "http://localhost:8000").rstrip("/")
-    r = httpx.request(metodo, f"{base}{caminho}", json=corpo, timeout=60, trust_env=False,
-                      headers={"Authorization": f"Bearer {_token()}"})
+    r = httpx.request(metodo, f"{base}{caminho}", json=corpo if arquivos is None else None, files=arquivos,
+                      timeout=60, trust_env=False, headers={"Authorization": f"Bearer {_token()}"})
     if r.status_code >= 400:
         try:
             e = r.json()
         except ValueError:
-            e = {"erro": "http", "mensagem": r.text[:200]}
-        if e.get("erro") == "step_up":
+            e = {"codigo": "http", "texto": r.text[:200]}
+        codigo = e.get("codigo") or e.get("erro")
+        if codigo == "step_up":
             sys.exit("Esta ação exige autenticação recente (MFA nos últimos 5 min). Rode `python -m auditor login` e "
                      "repita o comando.")
-        sys.exit(f"[{r.status_code} {e.get('erro')}] {e.get('mensagem') or e.get('detail')}")
+        sys.exit(f"[{r.status_code} {codigo}] {e.get('texto') or e.get('mensagem') or e.get('detail')}"
+                 + (f" (código {e['correlacao']})" if e.get("correlacao") else ""))
     return r if bruto else r.json()
+
+
+def todas(caminho: str = "/api/investigacoes", **filtros) -> list[dict]:
+    """A lista vem paginada em `itens` (W2)."""
+    from urllib.parse import urlencode
+    out, pagina = [], 1
+    while True:
+        r = api("GET", f"{caminho}?{urlencode({**{k: v for k, v in filtros.items() if v}, 'pagina': pagina, 'por_pagina': 100})}")
+        out += r["itens"]
+        if pagina * r["por_pagina"] >= r["total"]:
+            return out
+        pagina += 1
 
 
 def mostrar(x):
@@ -96,10 +112,37 @@ def c_pedir(a):
     corpo = {"cpf": a.cpf, "titulo": a.titulo, "de": a.de, "ate": a.ate, "justificativa": a.justificativa,
              "fuso": a.fuso, "granularidade": a.granularidade, "varredura": a.varredura, "base_dias": a.base_dias,
              "instancias": a.instancias.split(",") if a.instancias else None}
+    corpo.update({"rascunho": a.rascunho, "preservacao_urgente": a.preservacao_urgente,
+                  "tipo_processo": a.tipo_processo, "processo": a.processo,
+                  "contas_informadas": [dict(zip(("instancia", "realm", "username"), x.split(":", 2)))
+                                        for x in a.conta or []] or None})
     if a.orgao:
         corpo["origem"] = {"orgao": a.orgao, "documento": a.documento, "processo": a.processo,
                            "fundamento": a.fundamento, "destinatario": a.destinatario}
-    mostrar(api("POST", "/api/investigacoes", corpo))
+        if not a.arquivo and not a.rascunho:
+            sys.exit("Pedido externo exige o documento de origem: --arquivo oficio.pdf (ou --rascunho)")
+        corpo["rascunho"] = True
+    r = api("POST", "/api/investigacoes", corpo)
+    if a.arquivo:
+        r["documento"] = _enviar_documento(r["investigacao"], Path(a.arquivo))
+        if not a.rascunho:
+            r.update(api("POST", f"/api/investigacoes/{r['investigacao']}/enviar"))
+    mostrar(r)
+
+
+def _enviar_documento(inv: int, arq: Path) -> dict:
+    return api("POST", f"/api/investigacoes/{inv}/documento", arquivos={"arquivo": (arq.name, arq.read_bytes())})
+
+
+def c_baixar_documento(a):
+    r = api("GET", f"/api/investigacoes/{a.id}/documento", bruto=True)
+    saida = Path(a.saida)
+    saida.mkdir(parents=True, exist_ok=True)
+    from urllib.parse import unquote
+    cd = r.headers.get("content-disposition", "")
+    nome = Path(unquote(cd.split("filename*=UTF-8''", 1)[1]) if "filename*=" in cd else "documento").name
+    (saida / nome).write_bytes(r.content)
+    print(json.dumps({"arquivo": str(saida / nome), "sha256": r.headers.get("x-conteudo-sha256")}))
 
 
 def c_exportar(a):
@@ -134,7 +177,7 @@ _pacote_inv: dict[int, int] = {}
 
 def _inv_do_pacote(pacote: int) -> int:
     if pacote not in _pacote_inv:
-        for i in api("GET", "/api/investigacoes"):
+        for i in todas(visao="minhas"):
             for p in api("GET", f"/api/investigacoes/{i['id']}/pacotes") if "investigador" in i.get(
                     "minhas_funcoes", []) else []:
                 _pacote_inv[p["pacote"]] = i["id"]
@@ -159,8 +202,70 @@ def main(argv: list[str] | None = None):
         p.add_argument("--orgao", help="pedido externo: órgão de origem"); p.add_argument("--documento")
         p.add_argument("--processo"); p.add_argument("--fundamento"); p.add_argument("--destinatario")
         p.add_argument("--operador", help="ignorado: a identidade é a do login")
+        p.add_argument("--rascunho", action="store_true", help="grava sem enviar (depois: enviar --id N)")
+        p.add_argument("--preservacao-urgente", action="store_true")
+        p.add_argument("--tipo-processo", help="base legal (§10.1)")
+        p.add_argument("--arquivo", help="documento de origem (PDF ou imagem, até 10 MB)")
+        p.add_argument("--conta", action="append", help="conta informada: instancia:realm:username (repetível)")
         p.set_defaults(f=c_pedir)
-    sp.add_parser("pedidos").set_defaults(f=lambda a: mostrar(api("GET", "/api/investigacoes")))
+    p = sp.add_parser("pedidos")
+    p.add_argument("--visao", choices=("minhas", "aguardando", "lacunas", "retencao"))
+    p.add_argument("--estado", help="estados separados por vírgula"); p.add_argument("--q", help="nº ou processo")
+    p.set_defaults(f=lambda a: mostrar(todas(visao=a.visao, estado=a.estado, q=a.q)))
+    sp.add_parser("inicio").set_defaults(f=lambda a: mostrar(api("GET", "/api/inicio")))
+    p = sp.add_parser("notificacoes"); p.add_argument("--nao-lidas", action="store_true")
+    p.set_defaults(f=lambda a: mostrar(api("GET", f"/api/notificacoes?nao_lidas={int(a.nao_lidas)}")))
+    p = sp.add_parser("notificacao-lida"); g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--id", type=int); g.add_argument("--todas", action="store_true")
+    p.set_defaults(f=lambda a: mostrar(api("POST", "/api/notificacoes/lidas" if a.todas
+                                           else f"/api/notificacoes/{a.id}/lida")))
+    for nome, metodo, sufixo in (("enviar", "POST", "/enviar"), ("descartar", "DELETE", ""),
+                                 ("acompanhar", "GET", "/acompanhamento")):
+        p = sp.add_parser(nome); p.add_argument("--id", type=int, required=True)
+        p.set_defaults(f=lambda a, m=metodo, x=sufixo: mostrar(api(m, f"/api/investigacoes/{a.id}{x}")))
+    p = sp.add_parser("documento", help="anexa o documento de origem (rascunho ou devolvido)")
+    p.add_argument("--id", type=int, required=True); p.add_argument("--arquivo", required=True)
+    p.set_defaults(f=lambda a: mostrar(_enviar_documento(a.id, Path(a.arquivo))))
+    p = sp.add_parser("baixar-documento"); p.add_argument("--id", type=int, required=True)
+    p.add_argument("--saida", default="saida"); p.set_defaults(f=c_baixar_documento)
+    p = sp.add_parser("autorizar-preservacao"); p.add_argument("--id", type=int, required=True)
+    p.add_argument("--investigador", required=True); p.add_argument("--motivo", required=True)
+    p.set_defaults(f=lambda a: mostrar(api("POST", f"/api/investigacoes/{a.id}/autorizar-preservacao",
+                                           {"investigador": a.investigador, "motivo": a.motivo})))
+    for nome in ("prorrogar-preservacao", "pedir-acesso"):
+        p = sp.add_parser(nome); p.add_argument("--id", type=int, required=True)
+        p.add_argument("--motivo", required=True)
+        p.set_defaults(f=lambda a, n=nome: mostrar(api("POST", f"/api/investigacoes/{a.id}/{n}", {"motivo": a.motivo})))
+    p = sp.add_parser("estimar")
+    p.add_argument("--de", required=True); p.add_argument("--ate", required=True)
+    p.add_argument("--fuso", default="America/Bahia"); p.add_argument("--instancias")
+    p.add_argument("--varredura", action="store_true"); p.add_argument("--base-dias", type=int, default=0)
+    p.set_defaults(f=lambda a: mostrar(api("POST", "/api/estimativas", {
+        "de": a.de, "ate": a.ate, "fuso": a.fuso, "varredura": a.varredura, "base_dias": a.base_dias,
+        "instancias": a.instancias.split(",") if a.instancias else None})))
+    p = sp.add_parser("elegiveis", help="investigadores que podem ser designados (aprovador que decide)")
+    p.add_argument("--id", type=int, required=True)
+    p.set_defaults(f=lambda a: mostrar(api("GET", f"/api/investigacoes/{a.id}/investigadores-elegiveis")))
+    sp.add_parser("instancias-disponiveis").set_defaults(f=lambda a: mostrar(api("GET", "/api/instancias/disponiveis")))
+    sp.add_parser("substitutos").set_defaults(f=lambda a: mostrar(api("GET", "/api/substitutos")))
+    p = sp.add_parser("substituto"); p.add_argument("--usuario", required=True)
+    p.set_defaults(f=lambda a: mostrar(api("PUT", "/api/substitutos/eu", {"substituto": a.usuario})))
+    sp.add_parser("perfis").set_defaults(f=lambda a: mostrar(api("GET", "/api/perfis")))
+    p = sp.add_parser("papeis"); p.add_argument("--usuario", required=True)
+    p.add_argument("--conceder", default=""); p.add_argument("--revogar", default="")
+    p.add_argument("--motivo", required=True)
+    p.set_defaults(f=lambda a: mostrar(api("POST", f"/api/perfis/{a.usuario}/papeis", {
+        "conceder": [x for x in a.conceder.split(",") if x], "revogar": [x for x in a.revogar.split(",") if x],
+        "motivo": a.motivo})))
+    sp.add_parser("recertificacoes").set_defaults(f=lambda a: mostrar(api("GET", "/api/recertificacoes")))
+    p = sp.add_parser("recertificar"); p.add_argument("--usuarios"); p.add_argument("--prazo-dias", type=int, default=30)
+    p.set_defaults(f=lambda a: mostrar(api("POST", "/api/recertificacoes", {
+        "usuarios": a.usuarios.split(",") if a.usuarios else None, "prazo_dias": a.prazo_dias})))
+    p = sp.add_parser("confirmar-recertificacao"); p.add_argument("--id", type=int, required=True)
+    p.add_argument("--usuario", required=True); g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--manter", action="store_true"); g.add_argument("--revogar", action="store_true")
+    p.set_defaults(f=lambda a: mostrar(api("POST", f"/api/recertificacoes/{a.id}/confirmar",
+                                           {"username": a.usuario, "manter": a.manter})))
     sp.add_parser("aprovacoes").set_defaults(f=lambda a: mostrar(api("GET", "/api/aprovacoes")))
     p = sp.add_parser("ver"); p.add_argument("--id", type=int, required=True)
     p.set_defaults(f=lambda a: mostrar(api("GET", f"/api/investigacoes/{a.id}")))
@@ -220,6 +325,8 @@ def main(argv: list[str] | None = None):
         "sonda": a.sonda, "realms_esperados": [x for x in a.realms_esperados.split(",") if x]})))
     p = sp.add_parser("sondas"); p.add_argument("--nome", required=True)
     p.set_defaults(f=lambda a: mostrar(api("POST", f"/api/instancias/{a.nome}/sondas")))
+    p = sp.add_parser("testar"); p.add_argument("--nome", required=True)
+    p.set_defaults(f=lambda a: mostrar(api("POST", f"/api/instancias/{a.nome}/testar")))
     for nome in ("init", "chave", "worker", "chaveiro", "api", "ancorar", "migrar-cifra"):
         sp.add_parser(nome).set_defaults(f=lambda a, n=nome: sys.exit(
             f"`{n}` não existe no modo producao: é do servidor (Administrador técnico ou Operador do Vault)"))

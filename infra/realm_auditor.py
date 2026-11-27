@@ -10,9 +10,13 @@ Cria:
   * clientes: kc-auditor-bff (confidencial, código + PKCE), kc-auditor-cli (público, device flow); os dois emitem
     tokens com audiência kc-auditor-api e kc-auditor-chaveiro;
   * usuários de teste, um ou mais por perfil, inclusive um com papéis conflitantes e o operador do Vault (sem papel).
-    Senha: "senha-<usuario>". O OTP é configurado no primeiro login (tests/navegador_kc.py faz isso sozinho).
+    Senha: "senha-<usuario>". O OTP é configurado no primeiro login (tests/navegador_kc.py faz isso sozinho);
+  * (W2) conta de serviço `kc-auditor-gestao` (client credentials), só com manage-users e view-users deste realm:
+    é por ela que a API concede e revoga perfis e que o worker vigia mudanças de papel; o atributo `coordenador=true`
+    no usuário (claim `coordenador`) marca a coordenação (escalonamento, prorrogação da preservação) — coordenador1.
 
-Grava chaves/realm_auditor.json (segredo do BFF), fora do git.
+As origens de retorno já cadastradas nos clientes são mantidas (a lista só cresce; remova pelo console).
+Grava chaves/realm_auditor.json (segredos do BFF e da conta de gestão), fora do git.
 """
 from __future__ import annotations
 
@@ -36,7 +40,9 @@ USUARIOS = {
     "gestor1": (["gestor_acesso"], "Segurança da informação"),
     "operadorvault1": ([], "Infraestrutura de chaves"),
     "conflito1": (["admin_tecnico", "investigador"], "Infraestrutura"),   # bloqueado no login
+    "coordenador1": (["aprovador"], "Coordenação"),                         # W2: atributo coordenador=true
 }
+ATRIBUTOS = {"coordenador1": {"coordenador": ["true"]}}
 
 
 class KC:
@@ -83,6 +89,30 @@ def fluxo_mfa(kc: KC):
     return nome
 
 
+GESTAO = "kc-auditor-gestao"
+
+
+def conta_gestao(kc: KC) -> str:
+    """Conta de serviço da gestão de acesso (W2): client credentials, só manage-users e view-users do realm."""
+    exist = kc.r("GET", f"/{REALM}/clients", params={"clientId": GESTAO})
+    if not exist:
+        kc.r("POST", f"/{REALM}/clients", json={
+            "clientId": GESTAO, "protocol": "openid-connect", "publicClient": False, "serviceAccountsEnabled": True,
+            "standardFlowEnabled": False, "directAccessGrantsEnabled": False, "implicitFlowEnabled": False,
+            "description": "kc-auditor: concessão/revogação de perfis e vigia de papéis (W2)"})
+        exist = kc.r("GET", f"/{REALM}/clients", params={"clientId": GESTAO})
+    cid = exist[0]["id"]
+    sa = kc.r("GET", f"/{REALM}/clients/{cid}/service-account-user")
+    rm = kc.r("GET", f"/{REALM}/clients", params={"clientId": "realm-management"})[0]
+    papeis = [kc.r("GET", f"/{REALM}/clients/{rm['id']}/roles/{p}") for p in ("manage-users", "view-users")]
+    kc.r("POST", f"/{REALM}/users/{sa['id']}/role-mappings/clients/{rm['id']}", json=papeis)
+    # Keycloak 26.4+: a Admin API exige a audiência dela no token (escopo embutido kc-admin-api)
+    adm = [e for e in kc.r("GET", f"/{REALM}/client-scopes") if e["name"] == "kc-admin-api"]
+    if adm:
+        kc.r("PUT", f"/{REALM}/clients/{cid}/default-client-scopes/{adm[0]['id']}")
+    return kc.r("GET", f"/{REALM}/clients/{cid}/client-secret")["value"]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kc", default="http://localhost:8090")
@@ -120,6 +150,11 @@ def main():
                  "config": {"user.attribute": "unidade", "claim.name": "unidade", "jsonType.label": "String",
                             "access.token.claim": "true", "id.token.claim": "true", "userinfo.token.claim": "true"}}]})
         escopos = {s["name"]: s for s in kc.r("GET", f"/{REALM}/client-scopes")}
+    # W2: coordenação no token (escopo já existente ganha o mapeador)
+    kc.r("POST", f"/{REALM}/client-scopes/{escopos['kc-auditor']['id']}/protocol-mappers/models", json={
+        "name": "coordenador", "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-attribute-mapper",
+        "config": {"user.attribute": "coordenador", "claim.name": "coordenador", "jsonType.label": "boolean",
+                   "access.token.claim": "true", "id.token.claim": "false", "userinfo.token.claim": "false"}})
     acr = {"default.acr.values": "mfa", "minimum.acr.value": "mfa", "pkce.code.challenge.method": "S256",
            "post.logout.redirect.uris": "##".join(f"{o}/*" for o in origens)}
     clientes = {
@@ -138,16 +173,25 @@ def main():
             kc.r("POST", f"/{REALM}/clients", json={"clientId": cid, "protocol": "openid-connect", **rep})
             exist = kc.r("GET", f"/{REALM}/clients", params={"clientId": cid})
         else:
+            if "redirectUris" in rep:   # mantém as origens já cadastradas (outras frentes de desenvolvimento)
+                rep["redirectUris"] = sorted(set(rep["redirectUris"]) | set(exist[0].get("redirectUris") or []))
+                rep["webOrigins"] = sorted(set(rep["webOrigins"]) | set(exist[0].get("webOrigins") or []))
+                antigos = (exist[0].get("attributes") or {}).get("post.logout.redirect.uris", "")
+                rep["attributes"]["post.logout.redirect.uris"] = "##".join(sorted(
+                    set(rep["attributes"]["post.logout.redirect.uris"].split("##")) | set(x for x in antigos.split("##")
+                                                                                          if x)))
             kc.r("PUT", f"/{REALM}/clients/{exist[0]['id']}", json={**exist[0], **rep,
                                                                    "attributes": {**exist[0].get("attributes", {}),
                                                                                   **rep["attributes"]}})
         kc.r("PUT", f"/{REALM}/clients/{exist[0]['id']}/default-client-scopes/{escopos['kc-auditor']['id']}")
     bff = kc.r("GET", f"/{REALM}/clients", params={"clientId": "kc-auditor-bff"})[0]
     segredo = kc.r("GET", f"/{REALM}/clients/{bff['id']}/client-secret")["value"]
+    segredo_gestao = conta_gestao(kc)
     for u, (papeis, unidade) in USUARIOS.items():
         kc.r("POST", f"/{REALM}/users", json={
             "username": u, "enabled": True, "firstName": u.capitalize(), "lastName": "Teste",
-            "email": f"{u}@auditor.invalid", "emailVerified": True, "attributes": {"unidade": [unidade]},
+            "email": f"{u}@auditor.invalid", "emailVerified": True,
+            "attributes": {"unidade": [unidade], **ATRIBUTOS.get(u, {})},
             "credentials": [{"type": "password", "value": f"senha-{u}", "temporary": False}]})
         uid = kc.r("GET", f"/{REALM}/users", params={"username": u, "exact": "true"})[0]["id"]
         reps = [kc.r("GET", f"/{REALM}/roles/{p}") for p in papeis]
@@ -155,8 +199,10 @@ def main():
             kc.r("POST", f"/{REALM}/users/{uid}/role-mappings/realm", json=reps)
     destino = RAIZ / "chaves" / "realm_auditor.json"
     destino.parent.mkdir(exist_ok=True)
-    destino.write_text(json.dumps({"emissor": f"{a.kc}/realms/{REALM}", "bff_id": "kc-auditor-bff",
-                                   "bff_segredo": segredo, "cli_id": "kc-auditor-cli"}, indent=1))
+    atual = json.loads(destino.read_text()) if destino.exists() else {}
+    destino.write_text(json.dumps({**atual, "emissor": f"{a.kc}/realms/{REALM}", "bff_id": "kc-auditor-bff",
+                                   "bff_segredo": segredo, "cli_id": "kc-auditor-cli", "gestao_id": GESTAO,
+                                   "gestao_segredo": segredo_gestao}, indent=1))
     os.chmod(destino, 0o600)
     print(f"realm '{REALM}' pronto em {a.kc}; segredo do BFF em {destino.relative_to(RAIZ)}")
     print(f"  export AUDITOR_OIDC_EMISSOR={a.kc}/realms/{REALM}")

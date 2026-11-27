@@ -318,7 +318,7 @@ def selar(cx, inv_id: int, t: dict, origem: str = "coleta") -> dict:
 
 # ------------------------------------------------------------------ fila de tarefas
 CHAVE_INV = 0x6B64   # namespace dos advisory locks por investigação ("kd")
-ESTADOS_PARADA = ("pausada", "cancelada")
+ESTADOS_PARADA = ("pausada", "cancelada", "recusada")   # recusada: DEK destruída (W2)
 
 
 def pegar_tarefa(cx, inv_id: int | None = None):

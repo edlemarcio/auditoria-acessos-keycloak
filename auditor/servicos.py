@@ -18,6 +18,7 @@ from . import coleta, investigar, redigir
 from .db import conectar, trilha
 
 LEASE_JOB = timedelta(minutes=30)
+FAXINA_S = float(__import__("os").environ.get("AUDITOR_FAXINA_S", "60"))   # laço de limpeza do worker
 FINAIS = ("concluida", "concluida_com_lacunas", "cancelada")
 
 
@@ -98,9 +99,23 @@ def fechar(inv_id: int) -> dict | None:
             r["pseudonimos"] = atribuir(cx, Cofre(inv_id, "fechar"))
             cx.execute("UPDATE job SET status='concluido', atualizado=now() WHERE investigacao_id=%s "
                        "AND tipo='fechar' AND status='pendente'", (inv_id,))
+            _avisar_fim(cx, inv_id, r["status"])
             return r
         finally:
             cx.execute("SELECT pg_advisory_unlock(%s, %s)", (coleta.CHAVE_INV, inv_id))
+
+
+def _avisar_fim(cx, inv_id: int, status: str):
+    """Coleta concluída ou com falha: notificação ao investigador e ao solicitante (W2, §7.12). Na coleta lacrada,
+    só o investigador designado sabe que terminou."""
+    from . import gestao
+    i = cx.execute("SELECT lacrada FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
+    funcoes_ = ("investigador",) if i["lacrada"] else ("investigador", "solicitante")
+    tipo = "coleta_falhou" if status == "parcial" else "coleta_concluida"
+    texto = {"concluida": "concluída", "concluida_com_lacunas": "concluída com lacunas",
+             "parcial": "interrompida com fatias pendentes (retome)"}.get(status, status)
+    gestao.notificar(cx, gestao.designados(cx, inv_id, *funcoes_), tipo, f"Coleta da investigação nº {inv_id} {texto}",
+                     inv_id)
 
 
 # ------------------------------------------------------------------ jobs e worker
@@ -139,6 +154,11 @@ def executar_job(cx, j: dict):
         novo = "falhou" if j["tentativas"] >= 3 else "pendente"
         cx.execute("UPDATE job SET status=%s, erro=%s, atualizado=now() WHERE id=%s",
                    (novo, redigir.erro(f"{type(e).__name__}: {e}")[:500], j["id"]))
+        if novo == "falhou" and j["tipo"] in ("preparar", "fechar"):
+            from . import gestao
+            gestao.notificar(cx, gestao.designados(cx, j["investigacao_id"], "investigador"), "coleta_falhou",
+                             f"Falha ao {'preparar' if j['tipo'] == 'preparar' else 'fechar'} a investigação nº "
+                             f"{j['investigacao_id']} (o administrador técnico vê o diagnóstico)", j["investigacao_id"])
 
 
 def worker(threads: int = 4, ocioso_s: float | None = None, parar: threading.Event | None = None,
@@ -155,10 +175,26 @@ def worker(threads: int = 4, ocioso_s: float | None = None, parar: threading.Eve
 
     def laco(n: int):
         clientes = coleta.Clientes()
-        ultimo, faxina = time.monotonic(), time.monotonic()
+        ultimo, faxina, ponto = time.monotonic(), time.monotonic() - FAXINA_S, 0.0
         try:
             with conectar() as cx:
                 while not parar.is_set():
+                    agora = time.monotonic()
+                    if n == 0 and agora - ponto > 10:   # batimento (saúde dos workers), mesmo com trabalho
+                        from .gestao import bater_ponto
+                        bater_ponto(cx, papel)
+                        ponto = agora
+                    if n == 0 and agora - faxina > FAXINA_S:   # uma thread: leases vencidos, âncora diária e (W2)
+                        coleta.devolver_leases_vencidos(cx)  # prazos, escalonamento, recertificação e vigia de papéis
+                        from .ancora import ancorar_pendentes
+                        ancorar_pendentes(cx)
+                        if papel != "pacotes":
+                            from .gestao import faxina as faxina_gestao
+                            try:
+                                faxina_gestao(cx)
+                            except Exception as e:  # noqa: BLE001  (tenta de novo no próximo ciclo)
+                                print(f"faxina: {redigir.erro(f'{type(e).__name__}: {e}')}", flush=True)
+                        faxina = agora
                     j = pegar_job(cx, tipos)
                     if j:
                         executar_job(cx, j)
@@ -183,11 +219,6 @@ def worker(threads: int = 4, ocioso_s: float | None = None, parar: threading.Eve
                         continue
                     if ocioso_s is not None and agora - ultimo > ocioso_s:
                         return
-                    if n == 0 and agora - faxina > 60:   # uma thread cuida dos leases vencidos e da âncora diária
-                        coleta.devolver_leases_vencidos(cx)
-                        from .ancora import ancorar_pendentes
-                        ancorar_pendentes(cx)
-                        faxina = agora
                     parar.wait(1.0)
         finally:
             clientes.fechar()

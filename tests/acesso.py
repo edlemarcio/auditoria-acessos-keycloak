@@ -207,9 +207,14 @@ def executar():
     ext = {**corpo, "justificativa": "Ofício 12/2026 da Polícia Federal",
            "origem": {"orgao": "Polícia Federal", "documento": "Ofício 12/2026", "fundamento": "Requisição em IPL",
                       "processo": "IPL 1/2026", "destinatario": "Delegado responsável"}}
-    r = web["investigador2"].post(f"{API}/api/investigacoes", json=ext)
-    checar(r.status_code == 201, "2 investigador registra pedido externo (ofício)", r.text[:80])
-    E = r.json()["investigacao"]
+    # W2: o pedido externo exige o documento de origem antes do envio (rascunho → documento → enviar)
+    r = web["investigador2"].post(f"{API}/api/investigacoes", json={**ext, "rascunho": True})
+    E = r.json().get("investigacao")
+    rd = web["investigador2"].post(f"{API}/api/investigacoes/{E}/documento",
+                                   files={"arquivo": ("oficio.pdf", b"%PDF-1.4 oficio 12/2026")})
+    re_ = web["investigador2"].post(f"{API}/api/investigacoes/{E}/enviar")
+    checar(r.status_code == 201 and rd.status_code == 201 and re_.status_code == 200,
+           "2 investigador registra pedido externo (ofício)", f"{r.text[:60]} {rd.status_code} {re_.text[:60]}")
     r = web["investigador2"].post(f"{API}/api/investigacoes", json=corpo)
     checar(r.status_code == 403, "2 investigador não pede investigação sem origem externa", r.status_code)
     r = web["aprovador2"].post(f"{API}/api/investigacoes/{E}/aprovar", json={"investigador": "investigador2",

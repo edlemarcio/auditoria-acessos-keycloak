@@ -428,9 +428,80 @@ O teste cobre:
 
 **Ficou para depois:**
 - RLS no banco por designação. A W1 não lê eventos pela API; isso entra com as telas de dados (W3).
-- Escalonamento ao substituto, recertificação semestral, alerta automático de mudança de papel no realm
-  (`casos.alerta_papel` já existe; falta o vigia dos eventos administrativos), documento de origem anexado e telas
-  (W2).
+- Escalonamento ao substituto, recertificação semestral, alerta automático de mudança de papel no realm,
+  documento de origem anexado e telas: W2 (seção seguinte).
+
+## Gestão: servidor da W2 (0.5.0-dev)
+
+O contrato entre as telas e o servidor está em `docs/W2_CONTRATO.md` (com as mudanças registradas no fim). Tudo
+passa por `auditor/casos.py`, igual pela web e pela CLI de produção; a tela só mostra os botões que vierem em `acoes`.
+
+**Atualizar.** `python -m auditor init` aplica a migração `0009` (rascunho, documento, preservação, notificações,
+substitutos, recertificação, vigia e batimento dos workers). `python infra/realm_auditor.py` cria a conta de serviço
+`kc-auditor-gestao` (só `manage-users`/`view-users` do realm `auditor`, segredo em `chaves/realm_auditor.json`), o
+claim `coordenador` e o usuário `coordenador1`; as origens de retorno já cadastradas são mantidas.
+
+**O que entrou:**
+- **Início** (`/api/inicio`) por perfil, **lista** paginada com visões, estados e busca tolerante (`q` casa o nº da
+  investigação ou o nº do processo inteiro, com qualquer pontuação) e **detalhe** com linha do tempo
+  (motivo só para quem pode ler), expiração dos eventos por realm, estimativa, documento e preservação;
+- **assistente**: `POST /api/estimativas` (não grava nada), rascunho (`"rascunho": true`, `PUT`, `enviar`, `DELETE`
+  descarta e destrói as DEKs) e `tipo_processo`;
+- **documento de origem** (PDF/PNG/JPEG até 10 MB), cifrado com a DEK da investigação, nome também cifrado; o
+  SHA-256 vai para a trilha. Baixam o aprovador da fila e os designados, nunca o auditor interno. O pedido externo
+  só é enviado com o documento;
+- **preservação urgente**: o aprovador autoriza (step-up) a **coleta lacrada** — a coleta roda, mas pacotes,
+  downloads e ações de coleta respondem `409 lacrada` até a aprovação do pedido completo. Recusa destrói a DEK
+  (trilha `destruir_dek` com o fundamento). Em 3 dias úteis sem decisão, escalona à coordenação; em 5, destrói a DEK.
+  A coordenação (atributo `coordenador=true`) prorroga uma vez, +10 dias úteis;
+- **acompanhamento ao vivo**: `GET .../acompanhamento` (JSON) e `.../acompanhamento/stream` (SSE: `progresso` a
+  cada mudança, `heartbeat` a cada 15 s, `Last-Event-ID`, até 3 conexões por usuário, um leitor por investigação
+  compartilhado entre as conexões);
+- **notificações** (central e e-mail). O e-mail só é gravado em `logs/email.jsonl` (`AUDITOR_EMAIL`), endereçado ao
+  `sub`, com o tipo e o link, sem dado pessoal nem alvo mascarado;
+- **pedir acesso**: `202` igual para investigação existente ou não, na trilha global;
+- **substitutos e escalonamento**: pedido parado há 1 dia útil vai aos substitutos, há 2 à coordenação;
+- **perfis**: o gestor de acesso concede e revoga pelo Keycloak Admin (step-up), e a API recusa combinação proibida
+  antes de chamar o Keycloak. Recertificação com prazo (o não confirmado é revogado). O **vigia** compara os papéis do
+  realm a cada ciclo e alerta o auditor interno (notificação + SIEM) de qualquer mudança, inclusive feita direto no
+  console do Keycloak;
+- **administração**: saúde com filas e batimento dos workers, `POST /api/instancias/{nome}/testar`;
+- **apoio às telas**: `GET /api/aprovacoes` com prazo, escalonamento e risco de expiração (realm mais crítico),
+  `GET .../investigadores-elegiveis` (só o aprovador que decide) e `GET /api/instancias/disponiveis` (nome e realms);
+- o **nº do processo** é texto livre cifrado com a DEK; a busca compara o HMAC do número normalizado. Contas
+  informadas no pedido (`instancia`, `realm`, `username`) ficam cifradas e entram no preparo;
+- **telas**: `web/dist` servido em `/` como SPA (assets com cache longo, CSP do W1); sem a compilação, `/` responde
+  503 com "Interface não compilada (npm run build em web/)" (`AUDITOR_WEB_DIST` muda a pasta);
+- **erro inesperado**: 500 com código de correlação (`7F2A-91C0`), que também vai para `logs/api_erros.jsonl`, com
+  a mensagem redigida. Erro de validação não ecoa o corpo recebido.
+
+O **laço de limpeza do worker** (a cada `AUDITOR_FAXINA_S`, padrão 60 s, mesmo com trabalho na fila) cuida dos
+leases, da âncora diária, dos prazos da preservação, do escalonamento, das recertificações vencidas e do vigia.
+
+**CLI de produção** (novos comandos): `inicio`, `notificacoes [--nao-lidas]`, `notificacao-lida --id N|--todas`,
+`pedidos [--visao --estado --q]`, `pedir ... [--rascunho] [--preservacao-urgente] [--tipo-processo]
+[--arquivo oficio.pdf]`, `enviar`, `descartar`, `documento --id N --arquivo`, `baixar-documento`, `acompanhar`,
+`estimar`, `autorizar-preservacao`, `prorrogar-preservacao`, `pedir-acesso`, `substitutos`, `substituto --usuario`,
+`perfis`, `papeis --usuario --conceder a,b --revogar c --motivo`, `recertificacoes`, `recertificar`,
+`confirmar-recertificacao`, `testar --nome`, `elegiveis --id N`, `instancias-disponiveis`, `pedir ... --conta
+instancia:realm:username`.
+
+**Teste de aceite do servidor da W2.** Sobe a API na porta 8300 e um worker, e percorre tudo acima pela API como a
+web faria (cookie + `X-Requisicao`), inclusive uma investigação de 180 dias em kc26 e kc18 e os prazos com relógio
+simulado. Usa um banco próprio e dois usuários descartáveis do realm (`w2teste1`, `w2teste2`). Leva cerca de 10 min:
+
+```bash
+docker exec kc-auditor-pg-auditor-1 createdb -U keycloak auditor_w2b
+AUDITOR_DSN=postgresql://keycloak:keycloak@localhost:5435/auditor_w2b python -m auditor init
+psql postgresql://keycloak:keycloak@localhost:5435/auditor_w2b -v senha_app="'senha-app-teste'" -f infra/papeis.sql
+export AUDITOR_DSN=postgresql://kc_auditor_app:senha-app-teste@localhost:5435/auditor_w2b
+python -m auditor instancia-add --nome kc26 ...; python -m auditor instancia-add --nome rhsso ...   # como no W1
+python tests/gestao.py
+```
+
+**Ficou para depois:** RLS (W3); Dashboard, Eventos e Contas (W3); nova cifra da DEK de terceiros na exclusão de
+conta (W3); no modo vault, o chaveiro ainda não entrega a DEK para editar rascunho, anexar documento e destruir a
+DEK na recusa (o teste da W2 roda no modo local); calendário de feriados nos dias úteis; SMTP institucional.
 
 ## Acessos da stack de teste
 

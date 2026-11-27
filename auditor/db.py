@@ -100,6 +100,8 @@ def trilha(cx, operador: str, acao: str, investigacao_id: int | None = None, **d
 
     from . import cripto
     livres = {k: detalhe.pop(k) for k in CAMPOS_LIVRES if detalhe.get(k) is not None}
+    for k in CAMPOS_LIVRES:   # campo livre vazio não fica no detalhe (nem como null)
+        detalhe.pop(k, None)
     detalhe = json.loads(json.dumps(detalhe, default=str))
     cadeia = investigacao_id or 0
     with cx.transaction():

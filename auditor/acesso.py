@@ -32,13 +32,15 @@ class Ator:
     nome: str | None = None
     unidade: str | None = None
     token: str | None = field(default=None, repr=False)   # access token, repassado ao chaveiro (modo vault)
+    coordenador: bool = False       # atributo coordenador=true no realm (W2: escalonamento, prorrogação)
 
     @classmethod
     def de_claims(cls, c: dict, porta: str, token: str | None = None) -> "Ator":
         from .oidc import papeis
         return cls(sub=c["sub"], username=c.get("preferred_username", c["sub"]),
                    papeis=frozenset(papeis(c) & set(PAPEIS)), auth_time=int(c.get("auth_time") or 0), porta=porta,
-                   nome=c.get("name"), unidade=c.get("unidade"), token=token)
+                   nome=c.get("name"), unidade=c.get("unidade"), token=token,
+                   coordenador=str(c.get("coordenador", "")).lower() == "true")
 
     def tem(self, *papeis: str) -> bool:
         return bool(self.papeis & set(papeis))
@@ -48,6 +50,11 @@ class Ator:
             raise Negado("sem_perfil", "Usuário sem perfil no auditor")
         if not self.tem(*papeis):
             raise Negado("perfil", f"Exige o perfil {' ou '.join(papeis)}")
+
+    def exigir_perfil(self):
+        """Qualquer perfil do auditor (rotas comuns: início, notificações, pedir acesso)."""
+        if not self.papeis:
+            raise Negado("sem_perfil", "Usuário sem perfil no auditor")
 
     def exigir_recente(self):
         if time.time() - self.auth_time > STEP_UP_S:
@@ -60,6 +67,11 @@ def conferir_papeis(papeis) -> None:
     for x in EXCLUSIVOS:
         if x in p and len(p) > 1:
             raise Negado("papeis_conflitantes", f"O perfil {x} não acumula outros perfis: login recusado")
+
+
+def sem_acesso() -> Negado:
+    """Mesma resposta para "não existe" e "sem vínculo" (§7.1)."""
+    return Negado("sem_acesso", "Investigação inexistente ou sem vínculo com você", 404)
 
 
 def funcoes(cx, inv_id: int, sub: str) -> set[str]:

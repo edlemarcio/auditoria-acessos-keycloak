@@ -17,6 +17,21 @@ from .kc import ClienteKC
 DIA_MS = 86400_000
 
 
+def periodo(inicio: str, fim: str, fuso: str) -> tuple[int, int]:
+    """Início e fim (exclusivo) em ms; data sem hora no fim inclui o dia inteiro."""
+    try:
+        tz = ZoneInfo(fuso)
+        ini = int(datetime.fromisoformat(inicio).replace(tzinfo=tz).timestamp() * 1000)
+        fim_ = int(datetime.fromisoformat(fim).replace(tzinfo=tz).timestamp() * 1000)
+    except (ValueError, KeyError) as e:
+        raise ValueError("Período ou fuso inválido") from e
+    if len(fim) <= 10:   # data sem hora: inclui o dia inteiro
+        fim_ += DIA_MS
+    if fim_ <= ini:
+        raise ValueError("Período inválido")
+    return ini, fim_
+
+
 def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str, fim: str,
           fuso: str = "America/Bahia", granularidade: str = "dia", instancias: list[str] | None = None,
           varredura: bool = False, base_dias: int = 0, anterior: int | None = None, status: str = "na_fila",
@@ -24,13 +39,7 @@ def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str,
     if not justificativa or len(justificativa.strip()) < 5:
         raise ValueError("Justificativa obrigatória")
     dig = normalizar(tipo, valor)
-    tz = ZoneInfo(fuso)
-    ini = int(datetime.fromisoformat(inicio).replace(tzinfo=tz).timestamp() * 1000)
-    fim_ = int(datetime.fromisoformat(fim).replace(tzinfo=tz).timestamp() * 1000)
-    if len(fim) <= 10:   # data sem hora: inclui o dia inteiro
-        fim_ += DIA_MS
-    if fim_ <= ini:
-        raise ValueError("Período inválido")
+    ini, fim_ = periodo(inicio, fim, fuso)
     h = chaves.hmac_alvo(tipo, dig)
     with conectar() as cx:
         # 'abrindo' até a DEK existir: o chaveiro só cria DEK de investigação em abertura e o alvo é cifrado com ela
@@ -99,7 +108,22 @@ def preparar(inv_id: int, contas_informadas: list[tuple[str, str, str]] | None =
                 sigilo.inserir_conta(cx, cf, inst["id"], h["realm"], h["user_id"], h["username"],
                                      origem="histórico", via="historico")
             for nome_inst, realm, uid in contas_informadas or []:
-                if nome_inst == inst["nome"] and uid == "*":   # realm inteiro (teste de carga)
+                if nome_inst == inst["nome"] and uid.startswith("u:"):   # W2: username informado no pedido
+                    cli = ClienteKC(inst, inv_id, finalidade="preparar")
+                    try:
+                        for u in cli.get(f"/admin/realms/{realm}/users", {"username": uid[2:], "exact": "true",
+                                                                         "briefRepresentation": "false"},
+                                         guardar=lambda u, n=uid[2:]: u.get("username") == n):
+                            if u.get("username") == uid[2:]:
+                                sigilo.inserir_conta(cx, cf, inst["id"], realm, u["id"], u["username"],
+                                                     u.get("email"), u.get("createdTimestamp"), u.get("enabled"),
+                                                     origem="informada", via="informada")
+                    except Exception as e:  # noqa: BLE001  (realm inexistente ou sem permissão: segue sem a conta)
+                        resumo.setdefault("informadas_nao_achadas", []).append(f"{inst['nome']}/{realm}: "
+                                                                               f"{type(e).__name__}")
+                    finally:
+                        cli.fechar()
+                elif nome_inst == inst["nome"] and uid == "*":   # realm inteiro (teste de carga)
                     sigilo.inserir_conta(cx, cf, inst["id"], realm, None, "(realm inteiro)", origem="teste",
                                          via="realm")
                 elif nome_inst == inst["nome"]:

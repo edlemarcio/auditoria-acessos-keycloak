@@ -178,6 +178,17 @@ def alvo(inv: dict, finalidade: str) -> str:
     return cripto.decifrar(blob, cripto.ctx_alvo(inv["alvo_hmac"]))
 
 
+# ------------------------------------------------------------------ nº do processo (W2): busca sem o texto em claro
+def hmac_processo(normalizado: str) -> str:
+    """HMAC do nº do processo só com letras e dígitos (minúsculas): a busca `q` compara HMACs. Chave derivada só para
+    isso; no modo vault, a do chaveiro (rota /v1/hmac/processo)."""
+    if modo() == "vault":
+        return pedir("/v1/hmac/processo", valor=normalizado)["hmac"]
+    import hashlib
+    import hmac as _h
+    return _h.new(cripto._chave(b"kc-auditor/processo-hmac/v1"), normalizado.encode(), hashlib.sha256).hexdigest()
+
+
 # ------------------------------------------------------------------ segredos dos service accounts
 def cifrar_segredo(nome_instancia: str, segredo: str) -> bytes:
     if modo() == "vault":

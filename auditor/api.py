@@ -9,7 +9,11 @@ Duas formas de autenticação, ambas com MFA (acr=mfa) no realm dedicado:
     `X-Requisicao: kc-auditor` (CSRF);
   * CLI de produção: `Authorization: Bearer <access token>` obtido por device flow.
 
-  AUDITOR_OIDC_EMISSOR, AUDITOR_API_URL (http://localhost:8000), AUDITOR_BFF_SEGREDO (ou chaves/realm_auditor.json)
+W2: as telas (web/dist, SPA) são servidas em `/`; acompanhamento ao vivo por SSE (auditor/tempo_real.py); erro
+inesperado responde 500 com um código de correlação, que vai para logs/api_erros.jsonl sem dado pessoal.
+
+  AUDITOR_OIDC_EMISSOR, AUDITOR_API_URL (http://localhost:8000), AUDITOR_BFF_SEGREDO (ou chaves/realm_auditor.json),
+  AUDITOR_WEB_DIST (web/dist)
 """
 from __future__ import annotations
 
@@ -22,10 +26,12 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import __version__, casos, oidc
+from . import __version__, casos, oidc, tempo_real
 from .acesso import Ator, Negado
 from .db import conectar, trilha
 
@@ -49,7 +55,9 @@ app = FastAPI(title="kc-auditor", version=__version__, docs_url="/api/docs", ope
 @app.middleware("http")
 async def cabecalhos(request: Request, chamar):
     r = await chamar(request)
-    r.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
+    longo = request.url.path.startswith("/assets/") and r.status_code == 200   # arquivos com hash no nome (Vite)
+    r.headers.update({"Cache-Control": "public, max-age=31536000, immutable" if longo else "no-store",
+                      "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
                       "Referrer-Policy": "no-referrer",
                       "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'; object-src 'none'"})
     return r
@@ -61,6 +69,32 @@ async def negado(_req, e: Negado):
     if e.codigo == "step_up":
         corpo["login"] = "/auth/entrar?step_up=1"
     return JSONResponse(corpo, status_code=e.status)
+
+
+@app.exception_handler(RequestValidationError)
+async def invalido(_req, e: RequestValidationError):
+    """Sem eco do valor recebido (o corpo pode trazer o CPF): só onde e o quê."""
+    campos = [{"campo": ".".join(str(x) for x in err.get("loc", ())[1:]), "erro": err.get("type")}
+              for err in e.errors()]
+    return JSONResponse({"erro": "validacao", "mensagem": "Requisição inválida: " +
+                         ", ".join(c["campo"] or "corpo" for c in campos), "campos": campos}, status_code=422)
+
+
+@app.exception_handler(Exception)
+async def interno(req: Request, e: Exception):
+    """Erro inesperado: código de correlação na resposta e no log, sem dado pessoal (mensagem redigida)."""
+    from datetime import datetime, timezone
+
+    from .redigir import erro
+    cod = f"{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}"
+    p = Path(os.environ.get("AUDITOR_LOG_ERROS", "logs/api_erros.jsonl"))
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"quando": datetime.now(timezone.utc).isoformat(), "correlacao": cod,
+                            "metodo": req.method, "rota": getattr(req.scope.get("route"), "path", None),
+                            "erro": erro(f"{type(e).__name__}: {e}")[:500]}, ensure_ascii=False) + "\n")
+    return JSONResponse({"erro": "interno", "mensagem": f"Algo deu errado do nosso lado. Informe ao suporte o código "
+                                                        f"{cod}.", "correlacao": cod}, status_code=500)
 
 
 # ------------------------------------------------------------------ sessão
@@ -223,6 +257,46 @@ class Pedido(BaseModel):
     varredura: bool = False
     base_dias: int = 0
     origem: dict | None = None     # pedido externo: orgao, documento, processo, fundamento, destinatario
+    rascunho: bool = False         # W2: grava sem enviar
+    preservacao_urgente: bool = False
+    tipo_processo: str | None = None
+    processo: str | None = None    # texto livre: cifrado com a DEK; a busca usa o HMAC normalizado
+    contas_informadas: list[dict] | None = None   # [{"instancia", "realm", "username"}]
+
+
+class Estimativa(BaseModel):
+    de: str
+    ate: str
+    fuso: str = "America/Bahia"
+    granularidade: str = "dia"
+    instancias: list[str] | None = None
+    varredura: bool = False
+    base_dias: int = 0
+
+
+class Preservacao(BaseModel):
+    investigador: str
+    motivo: str
+
+
+class Substituto(BaseModel):
+    substituto: str
+
+
+class Papeis(BaseModel):
+    conceder: list[str] = []
+    revogar: list[str] = []
+    motivo: str
+
+
+class Recertificacao(BaseModel):
+    usuarios: list[str] | None = None
+    prazo_dias: int = 30
+
+
+class Confirmacao(BaseModel):
+    username: str
+    manter: bool
 
 
 class Aprovacao(BaseModel):
@@ -256,23 +330,188 @@ def r_eu(a: Ator = Depends(ator)):
     return casos.eu(a)
 
 
+@app.get("/api/inicio")
+def r_inicio(a: Ator = Depends(ator)):
+    return casos.inicio(a)
+
+
 @app.get("/api/investigacoes")
-def r_listar(a: Ator = Depends(ator)):
-    return casos.listar(a)
+def r_listar(visao: str | None = None, estado: str | None = None, q: str | None = None, de: str | None = None,
+             ate: str | None = None, pagina: int = 1, por_pagina: int = casos.POR_PAGINA, a: Ator = Depends(ator)):
+    return casos.listar(a, visao, [x for x in (estado or "").split(",") if x], q, de, ate, pagina, por_pagina)
+
+
+def _identificador(p: Pedido, obrigatorio: bool = True):
+    tipo, valor = ("cpf", p.cpf) if p.cpf else ("titulo", p.titulo)
+    if not valor and obrigatorio:
+        raise Negado("identificador", "Informe cpf ou titulo", 422)
+    return tipo, valor
 
 
 @app.post("/api/investigacoes", status_code=201)
 def r_pedir(p: Pedido, a: Ator = Depends(ator)):
-    tipo, valor = ("cpf", p.cpf) if p.cpf else ("titulo", p.titulo)
-    if not valor:
-        raise Negado("identificador", "Informe cpf ou titulo", 422)
+    tipo, valor = _identificador(p)
     return casos.pedir(a, tipo, valor, p.de, p.ate, p.justificativa, p.fuso, p.granularidade, p.instancias,
-                       p.varredura, p.base_dias, p.origem)
+                       p.varredura, p.base_dias, p.origem, p.rascunho, p.preservacao_urgente, p.tipo_processo,
+                       p.processo, p.contas_informadas)
+
+
+@app.put("/api/investigacoes/{inv}")
+def r_editar(inv: int, p: Pedido, a: Ator = Depends(ator)):
+    tipo, valor = _identificador(p, obrigatorio=False)
+    return casos.atualizar(a, inv, tipo, valor, p.de, p.ate, p.justificativa, p.fuso, p.granularidade, p.instancias,
+                           p.varredura, p.base_dias, p.origem, p.preservacao_urgente, p.tipo_processo, p.processo,
+                           p.contas_informadas)
+
+
+@app.post("/api/investigacoes/{inv}/enviar")
+def r_enviar(inv: int, a: Ator = Depends(ator)):
+    return casos.enviar(a, inv)
+
+
+@app.delete("/api/investigacoes/{inv}")
+def r_descartar(inv: int, a: Ator = Depends(ator)):
+    return casos.descartar(a, inv)
 
 
 @app.get("/api/investigacoes/{inv}")
 def r_ver(inv: int, a: Ator = Depends(ator)):
     return casos.ver(a, inv)
+
+
+def _multipart(corpo: bytes, tipo: str, campo: str) -> tuple[str, bytes]:
+    """multipart/form-data sem dependência extra (email da biblioteca padrão)."""
+    from email import policy
+    from email.parser import BytesParser
+    if not tipo.startswith("multipart/form-data"):
+        raise Negado("documento", "Envie multipart/form-data com o campo 'arquivo'", 415)
+    m = BytesParser(policy=policy.HTTP).parsebytes(f"Content-Type: {tipo}\r\n\r\n".encode() + corpo)
+    for parte in m.iter_parts() if m.is_multipart() else []:
+        if parte.get_param("name", header="content-disposition") == campo:
+            return parte.get_filename() or "documento", parte.get_payload(decode=True) or b""
+    raise Negado("documento", f"Campo '{campo}' ausente", 422)
+
+
+@app.post("/api/investigacoes/{inv}/documento", status_code=201)
+async def r_documento(inv: int, request: Request, a: Ator = Depends(ator)):
+    import asyncio
+    if int(request.headers.get("content-length") or 0) > casos.DOC_MAX + 64 * 1024:
+        raise Negado("documento", "Documento acima de 10 MB", 413)
+    corpo = await request.body()
+    if len(corpo) > casos.DOC_MAX + 64 * 1024:
+        raise Negado("documento", "Documento acima de 10 MB", 413)
+    nome, dados = _multipart(corpo, request.headers.get("content-type", ""), "arquivo")
+    return await asyncio.to_thread(casos.enviar_documento, a, inv, nome, dados)
+
+
+@app.get("/api/investigacoes/{inv}/documento")
+def r_baixar_documento(inv: int, a: Ator = Depends(ator)):
+    from urllib.parse import quote
+    nome, tipo, dados = casos.baixar_documento(a, inv)
+    return Response(dados, media_type=tipo, headers={
+        "Content-Disposition": f"attachment; filename=\"documento\"; filename*=UTF-8''{quote(nome)}",
+        "X-Conteudo-Sha256": hashlib.sha256(dados).hexdigest()})
+
+
+@app.post("/api/investigacoes/{inv}/autorizar-preservacao")
+def r_autorizar_preservacao(inv: int, d: Preservacao, a: Ator = Depends(ator)):
+    return casos.autorizar_preservacao(a, inv, d.investigador, d.motivo)
+
+
+@app.post("/api/investigacoes/{inv}/prorrogar-preservacao")
+def r_prorrogar_preservacao(inv: int, d: Motivo, a: Ator = Depends(ator)):
+    return casos.prorrogar_preservacao(a, inv, d.motivo)
+
+
+@app.post("/api/investigacoes/{inv}/pedir-acesso", status_code=202)
+def r_pedir_acesso(inv: int, d: Motivo, a: Ator = Depends(ator)):
+    return casos.pedir_acesso(a, inv, d.motivo)
+
+
+@app.get("/api/investigacoes/{inv}/acompanhamento")
+def r_acompanhamento(inv: int, a: Ator = Depends(ator)):
+    return casos.acompanhamento(a, inv)
+
+
+@app.get("/api/investigacoes/{inv}/acompanhamento/stream")
+def r_acompanhamento_stream(inv: int, request: Request, a: Ator = Depends(ator)):
+    casos.abrir_acompanhamento(a, inv)
+    try:
+        cid = tempo_real.reservar(a.sub)
+    except tempo_real.Limite:
+        raise Negado("limite_conexoes", f"No máximo {tempo_real.MAX_CONEXOES} conexões ao vivo por usuário", 429)
+    try:
+        ultimo = int(request.headers.get("last-event-id") or 0)
+    except ValueError:
+        ultimo = 0
+    return StreamingResponse(tempo_real.transmitir(request, inv, a.sub, cid, ultimo), media_type="text/event-stream",
+                             headers={"X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+
+@app.post("/api/estimativas")
+def r_estimativa(d: Estimativa, a: Ator = Depends(ator)):
+    return casos.estimar(a, d.de, d.ate, d.fuso, d.instancias, d.varredura, d.base_dias)
+
+
+@app.get("/api/notificacoes")
+def r_notificacoes(nao_lidas: int = 0, a: Ator = Depends(ator)):
+    return casos.notificacoes(a, bool(nao_lidas))
+
+
+@app.post("/api/notificacoes/lidas")
+def r_notificacoes_lidas(a: Ator = Depends(ator)):
+    return casos.marcar_lida(a, None)
+
+
+@app.post("/api/notificacoes/{nid}/lida")
+def r_notificacao_lida(nid: int, a: Ator = Depends(ator)):
+    return casos.marcar_lida(a, nid)
+
+
+@app.get("/api/substitutos")
+def r_substitutos(a: Ator = Depends(ator)):
+    return casos.substitutos(a)
+
+
+@app.put("/api/substitutos/eu")
+def r_substituto(d: Substituto, a: Ator = Depends(ator)):
+    return casos.definir_substituto(a, d.substituto)
+
+
+@app.get("/api/perfis")
+def r_perfis(a: Ator = Depends(ator)):
+    return casos.perfis(a)
+
+
+@app.post("/api/perfis/{username}/papeis")
+def r_papeis(username: str, d: Papeis, a: Ator = Depends(ator)):
+    return casos.mudar_papeis(a, username, d.conceder, d.revogar, d.motivo)
+
+
+@app.get("/api/recertificacoes")
+def r_recertificacoes(a: Ator = Depends(ator)):
+    return casos.recertificacoes(a)
+
+
+@app.post("/api/recertificacoes", status_code=201)
+def r_abrir_recertificacao(d: Recertificacao | None = None, a: Ator = Depends(ator)):
+    d = d or Recertificacao()
+    return casos.abrir_recertificacao(a, d.usuarios, d.prazo_dias)
+
+
+@app.get("/api/investigacoes/{inv}/investigadores-elegiveis")
+def r_elegiveis(inv: int, a: Ator = Depends(ator)):
+    return casos.investigadores_elegiveis(a, inv)
+
+
+@app.get("/api/instancias/disponiveis")
+def r_disponiveis(a: Ator = Depends(ator)):
+    return casos.instancias_disponiveis(a)
+
+
+@app.post("/api/recertificacoes/{rid}/confirmar")
+def r_confirmar_recertificacao(rid: int, d: Confirmacao, a: Ator = Depends(ator)):
+    return casos.confirmar_recertificacao(a, rid, d.username, d.manter)
 
 
 @app.get("/api/investigacoes/{inv}/progresso")
@@ -392,6 +631,11 @@ def r_sondas(nome: str, a: Ator = Depends(ator)):
     return casos.rodar_sondas(a, nome)
 
 
+@app.post("/api/instancias/{nome}/testar")
+def r_testar(nome: str, a: Ator = Depends(ator)):
+    return casos.testar_instancia(a, nome)
+
+
 @app.post("/api/instancias/{nome}/orcamento")
 def r_orcamento(nome: str, d: Orcamento, a: Ator = Depends(ator)):
     return casos.ajustar_orcamento(a, nome, d.concorrencia, d.req_por_s)
@@ -407,7 +651,31 @@ def r_usuarios(a: Ator = Depends(ator)):
     return casos.usuarios(a)
 
 
-ROTAS_PUBLICAS = {"/saude", "/auth/entrar", "/auth/retorno", "/auth/logout-canal", "/api/docs", "/api/openapi.json"}
+# ------------------------------------------------------------------ telas (W2 §14): web/dist como SPA
+def _dist() -> Path:
+    return Path(os.environ.get("AUDITOR_WEB_DIST", Path(__file__).resolve().parents[1] / "web" / "dist"))
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/{caminho:path}", include_in_schema=False)
+def r_spa(caminho: str = ""):
+    """Arquivo de web/dist se existir; senão index.html (rotas da SPA). /api e /auth nunca caem aqui."""
+    if caminho.split("/", 1)[0] in ("api", "auth"):
+        return JSONResponse({"erro": "inexistente", "mensagem": "Rota inexistente"}, status_code=404)
+    d = _dist().resolve()
+    if not (d / "index.html").is_file():
+        return PlainTextResponse("Interface não compilada (npm run build em web/)", status_code=503)
+    if caminho:
+        f = (d / caminho).resolve()
+        if f.is_file() and f.is_relative_to(d):
+            return FileResponse(f)
+        if caminho.startswith("assets/"):
+            return PlainTextResponse("Arquivo inexistente", status_code=404)
+    return FileResponse(d / "index.html", media_type="text/html")
+
+
+ROTAS_PUBLICAS = {"/saude", "/auth/entrar", "/auth/retorno", "/auth/logout-canal", "/api/docs", "/api/openapi.json",
+                  "/", "/{caminho:path}"}
 
 
 def servir(porta: int = 8000):
