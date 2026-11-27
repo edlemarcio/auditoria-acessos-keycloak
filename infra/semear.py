@@ -25,7 +25,8 @@ SENHA_TESTE = "Senha@Teste1"
 
 class Admin:
     def __init__(self, url, usuario, senha):
-        self.h = httpx.Client(base_url=url.rstrip("/"), timeout=120, trust_env=False)
+        self.h = httpx.Client(base_url=url.rstrip("/"), timeout=120, trust_env=False,
+                              headers={"Accept": "application/json"})
         self.u, self.s = usuario, senha
         self.login()
 
@@ -61,6 +62,8 @@ def main():
 
     for realm, rc in cfg.items():
         k.req("POST", "/realms", ok=(201, 409), json={"realm": realm, "enabled": True})
+        # a massa tem contas com o mesmo e-mail no realm (caso DUPLICADA e colisões aleatórias)
+        k.req("PUT", f"/realms/{realm}", json={"realm": realm, "duplicateEmailsAllowed": True})
         k.req("PUT", f"/realms/{realm}/events/config", json={
             "eventsEnabled": rc["events_enabled"], "eventsExpiration": rc["expiration"],
             "enabledEventTypes": rc["types"], "eventsListeners": ["jboss-logging"],
@@ -102,6 +105,10 @@ def main():
         "directAccessGrantsEnabled": False})
     cid = k.req("GET", "/realms/master/clients", params={"clientId": SERVICE_ACCOUNT["client_id"]})[0]["id"]
     sa = k.req("GET", f"/realms/master/clients/{cid}/service-account-user")["id"]
+    # Keycloak 26.8+: a Admin API exige no aud a URL do admin, emitida pelo client scope kc-admin-api
+    adm = [x for x in k.req("GET", "/realms/master/client-scopes") if x["name"] == "kc-admin-api"]
+    if adm:
+        k.req("PUT", f"/realms/master/clients/{cid}/default-client-scopes/{adm[0]['id']}")
     for realm, rc in cfg.items():
         if rc.get("sem_roles"):
             continue

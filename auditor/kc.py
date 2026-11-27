@@ -164,4 +164,13 @@ class ClienteKC:
         return self.get("/admin/realms", {"briefRepresentation": "true"})
 
     def eventos(self, realm: str, params: list[tuple[str, str]]):
-        return self.get(f"/admin/realms/{realm}/events", params)
+        evs = self.get(f"/admin/realms/{realm}/events", params)
+        # Keycloak <= 21 / RH-SSO 7.x não expõe o id do evento: id sintético pelo conteúdo + nº da ocorrência
+        # na resposta (eventos idênticos no mesmo ms são distintos; o modo dia lê o dia numa página só)
+        vistos: dict[str, int] = {}
+        for e in evs:
+            if "id" not in e:
+                h = hashlib.sha256(json.dumps(e, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                vistos[h] = vistos.get(h, 0) + 1
+                e["id"] = f"sha256:{h}:{vistos[h]}"
+        return evs
