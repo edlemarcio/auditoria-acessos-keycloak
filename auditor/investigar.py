@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Jsonb
 
 from . import coleta, descoberta
-from .cripto import cifrar, decifrar, hmac_alvo
-from .db import conectar, trilha
+from .cripto import cifrar, ctx_alvo, decifrar, hmac_alvo
+from .db import SNAPSHOTS_DA_INVESTIGACAO, conectar, trilha
 from .identificador import mascarar, normalizar
 from .kc import ClienteKC
 
@@ -29,11 +29,12 @@ def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str,
         fim_ += DIA_MS
     if fim_ <= ini:
         raise ValueError("Período inválido")
+    h = hmac_alvo(tipo, dig)
     with conectar() as cx:
         r = cx.execute("INSERT INTO investigacao (operador, justificativa, tipo, alvo_cifrado, alvo_hmac, "
                        "alvo_mascarado, inicio_ms, fim_ms, fuso, granularidade, parametros, execucao_anterior) "
                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-                       (operador, justificativa, tipo, cifrar(dig), hmac_alvo(tipo, dig), mascarar(tipo, dig),
+                       (operador, justificativa, tipo, cifrar(dig, ctx_alvo(h)), h, mascarar(tipo, dig),
                         ini, fim_, fuso, granularidade,
                         Jsonb({"instancias": instancias, "varredura": varredura, "base_dias": base_dias}),
                         anterior)).fetchone()
@@ -46,7 +47,7 @@ def preparar(inv_id: int, contas_informadas: list[tuple[str, str, str]] | None =
     """Descoberta, localização (atributo, username, histórico), quadro de contas e plano de tarefas."""
     with conectar() as cx:
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
-        dig = decifrar(inv["alvo_cifrado"])
+        dig = decifrar(inv["alvo_cifrado"], ctx_alvo(inv["alvo_hmac"]))
         nomes = inv["parametros"].get("instancias")
         insts = [i for i in cx.execute("SELECT * FROM instancia ORDER BY id").fetchall()
                  if not nomes or i["nome"] in nomes]
@@ -55,7 +56,7 @@ def preparar(inv_id: int, contas_informadas: list[tuple[str, str, str]] | None =
         for inst in insts:
             cli = ClienteKC(inst, inv_id)
             try:
-                realms = descoberta.descobrir(cx, inst, cli)
+                realms = descoberta.descobrir(cx, inst, cli, inv_id)
                 for s in realms:
                     snaps[(inst["id"], s["realm"])] = s
                 achadas, erros = descoberta.localizar(cli, inst, realms, inv["tipo"], dig)
@@ -119,8 +120,9 @@ def fechar(inv_id: int) -> dict:
     with conectar() as cx:
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
         cx.execute("DELETE FROM cobertura WHERE investigacao_id=%s", (inv_id,))
-        snaps = cx.execute("SELECT DISTINCT ON (instancia_id, realm) * FROM realm_snapshot WHERE lido_em >= %s "
-                           "ORDER BY instancia_id, realm, lido_em DESC", (inv["criado_em"],)).fetchall()
+        snaps = cx.execute("SELECT DISTINCT ON (instancia_id, realm) * FROM realm_snapshot s WHERE "
+                           + SNAPSHOTS_DA_INVESTIGACAO + " ORDER BY instancia_id, realm, lido_em DESC",
+                           {"inv": inv_id}).fetchall()
         nomes = inv["parametros"].get("instancias")
         insts = {i["id"]: i for i in cx.execute("SELECT * FROM instancia").fetchall()
                  if not nomes or i["nome"] in nomes}

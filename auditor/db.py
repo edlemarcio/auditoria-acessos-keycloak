@@ -158,6 +158,29 @@ BEGIN RAISE EXCEPTION 'trilha_auditoria aceita somente inserção'; END $$;
 DROP TRIGGER IF EXISTS trg_trilha_ro ON trilha_auditoria;
 CREATE TRIGGER trg_trilha_ro BEFORE UPDATE OR DELETE ON trilha_auditoria
   FOR EACH ROW EXECUTE FUNCTION trilha_somente_insercao();
+DROP TRIGGER IF EXISTS trg_trilha_truncate ON trilha_auditoria;
+CREATE TRIGGER trg_trilha_truncate BEFORE TRUNCATE ON trilha_auditoria
+  FOR EACH STATEMENT EXECUTE FUNCTION trilha_somente_insercao();
+CREATE TABLE IF NOT EXISTS conta_extra (
+  investigacao_id int,
+  conta_id int,
+  tipo text,
+  capturado_em timestamptz DEFAULT now(),
+  dados jsonb
+);
+-- snapshot ligado à investigação que o leu (antes da 0.2.0, ficava só o horário)
+ALTER TABLE realm_snapshot ADD COLUMN IF NOT EXISTS investigacao_id int REFERENCES investigacao(id);
+CREATE INDEX IF NOT EXISTS ix_snapshot_inv ON realm_snapshot (investigacao_id);
+"""
+
+
+# Snapshots de realm de uma investigação (parâmetro nomeado %(inv)s). Investigações anteriores à 0.2.0 não têm
+# investigacao_id nos snapshots: para elas vale a janela entre a criação e a conclusão da investigação.
+SNAPSHOTS_DA_INVESTIGACAO = """
+  (s.investigacao_id = %(inv)s OR (s.investigacao_id IS NULL
+   AND NOT EXISTS (SELECT 1 FROM realm_snapshot x WHERE x.investigacao_id = %(inv)s)
+   AND s.lido_em >= (SELECT criado_em FROM investigacao WHERE id = %(inv)s)
+   AND s.lido_em <= COALESCE((SELECT concluido_em FROM investigacao WHERE id = %(inv)s), now())))
 """
 
 
@@ -165,9 +188,15 @@ def conectar(autocommit: bool = True) -> psycopg.Connection:
     return psycopg.connect(DSN, autocommit=autocommit, row_factory=dict_row)
 
 
-def criar_esquema():
+def criar_esquema() -> dict | None:
+    """Cria/atualiza o esquema e converte segredos e alvos antigos para o formato de chaves v2."""
+    import os
     with conectar() as cx:
         cx.execute(SCHEMA)
+        if not os.environ.get("AUDITOR_CHAVE"):
+            return None   # sem chave não há o que migrar (instalação nova ou só esquema)
+        from .cripto import migrar_chaves
+        return migrar_chaves(cx)
 
 
 def trilha(cx, operador: str, acao: str, investigacao_id: int | None = None, **detalhe):

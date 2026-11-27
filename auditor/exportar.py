@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,13 +17,33 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from . import __version__, dashboard
 from .consolidar import ERROS, GLOSSARIO, categoria, consolidar, nome_evento
-from .cripto import decifrar
-from .db import conectar, trilha
+from .cripto import ctx_alvo, decifrar
+from .db import SNAPSHOTS_DA_INVESTIGACAO, conectar, trilha
 from .identificador import mascarar_texto
 from .manifesto import assinar_manifesto, linhas_eventos, sha256
 
 LIMITE_LINHAS = 1_048_575
 CLASSE = {"coberto": "Coberto", "parcial": "Parcial", "sem_dados": "Sem dados"}
+
+
+# parâmetros técnicos da Admin API; qualquer outro (user, username, q, search, email, resourcePath...) é redigido
+PARAMS_TECNICOS = {"type", "dateFrom", "dateTo", "first", "max", "direction", "exact", "briefRepresentation",
+                   "client", "operationTypes", "resourceTypes", "enabled"}
+REDIGIDO = "[redigido]"
+
+
+def redigir_requisicao(r: dict, msk) -> dict:
+    """Versão da requisição para o pacote mascarado: sem userId no caminho e sem parâmetros pessoais."""
+    caminho = re.sub(r"/users/[^/?]+", f"/users/{REDIGIDO}", r["caminho"])
+    params = r["params"]
+    if isinstance(params, dict):
+        params = {k: (v if k in PARAMS_TECNICOS else REDIGIDO) for k, v in params.items()}
+    return {**r, "caminho": msk(caminho), "params": params}
+
+
+def _linhas_requisicoes(reqs) -> bytes:
+    return b"".join(json.dumps({**r, "inicio": r["inicio"].isoformat()}, ensure_ascii=False,
+                               default=str).encode() + b"\n" for r in reqs)
 
 
 def _naive(ms, tz):
@@ -63,21 +84,28 @@ def _aba(wb, nome, cab, linhas, larguras=None, aviso=None, fmt_data=(), num=()):
 def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False) -> dict:
     with conectar() as cx:
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
-    dig = decifrar(inv["alvo_cifrado"])
+    dig = decifrar(inv["alvo_cifrado"], ctx_alvo(inv["alvo_hmac"]))
     tz = ZoneInfo(inv["fuso"])
     msk = (lambda s: s) if sem_mascara else (lambda s: mascarar_texto(s, inv["tipo"], dig))
     d = consolidar(inv_id)
     with conectar() as cx:
         d["base_eventos"] = cx.execute("SELECT ip FROM evento WHERE investigacao_id=%s AND time_ms < %s",
                                        (inv_id, inv["inicio_ms"])).fetchall()
+        # mesmo conjunto da planilha e do dashboard: só eventos de contas incluídas (D2)
         brutos = cx.execute("SELECT e.bruto, i.nome AS inst, e.realm FROM evento e JOIN instancia i "
-                            "ON i.id=e.instancia_id WHERE e.investigacao_id=%s", (inv_id,)).fetchall()
+                            "ON i.id=e.instancia_id JOIN conta c ON c.id=e.conta_id "
+                            "WHERE e.investigacao_id=%s AND c.incluida", (inv_id,)).fetchall()
+        excluidas = cx.execute("SELECT c.id, i.nome AS instancia, c.realm, c.user_id, c.username, c.via, "
+                               "(SELECT count(*) FROM evento e WHERE e.conta_id=c.id) AS eventos "
+                               "FROM conta c JOIN instancia i ON i.id=c.instancia_id "
+                               "WHERE c.investigacao_id=%s AND NOT c.incluida ORDER BY c.id", (inv_id,)).fetchall()
         reqs = cx.execute("SELECT id, caminho, params, status, inicio, ms, sha256, bytes, coletor FROM requisicao "
                           "WHERE investigacao_id=%s ORDER BY id", (inv_id,)).fetchall()
         insts = cx.execute("SELECT nome, url, versao_declarada, sondas FROM instancia").fetchall()
+        # só os snapshots lidos por esta investigação (D3)
         snaps = cx.execute("SELECT i.nome, s.realm, s.lido_em, s.visivel, s.config, s.user_profile, s.federacao, "
-                           "s.status FROM realm_snapshot s JOIN instancia i ON i.id=s.instancia_id "
-                           "WHERE s.lido_em >= %s ORDER BY s.id", (inv["criado_em"],)).fetchall()
+                           "s.status FROM realm_snapshot s JOIN instancia i ON i.id=s.instancia_id WHERE "
+                           + SNAPSHOTS_DA_INVESTIGACAO + " ORDER BY s.id", {"inv": inv_id}).fetchall()
     fr = d["fracoes"]
     filtros = "categorias: " + ", ".join(d["filtros"]["categorias"])
     aviso = None if fr["completa"] else (f"ATENÇÃO: cobertura parcial — realms {fr['realms'][0]}/{fr['realms'][1]}"
@@ -179,11 +207,14 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
         f"dashboard_{inv_id}.html": dashboard.gerar(d, msk).encode(),
     }
     ev_bytes = linhas_eventos([{**b["bruto"], "_instancia": b["inst"], "_realm": b["realm"]} for b in brutos])
-    req_bytes = b"".join(json.dumps({**r, "inicio": r["inicio"].isoformat()}, ensure_ascii=False,
-                                    default=str).encode() + b"\n" for r in reqs)
+    req_bytes = _linhas_requisicoes(reqs)
     if sem_mascara:
         arquivos["eventos.jsonl"] = ev_bytes
-    arquivos["requisicoes.jsonl"] = req_bytes
+        arquivos["requisicoes.jsonl"] = req_bytes
+    else:
+        # D1: os parâmetros de busca levam o identificador (q=cpf:..., username=...) e o caminho leva o userId.
+        # O pacote mascarado vai redigido e sem hash por linha; o manifesto guarda o hash do arquivo original inteiro.
+        arquivos["requisicoes.jsonl"] = _linhas_requisicoes([redigir_requisicao(r, msk) for r in reqs])
     manifesto = {
         "versao_coletor": __version__, "gerado_em": datetime.now(timezone.utc).isoformat(),
         "investigacao": {"id": inv_id, "alvo": inv["alvo_mascarado"], "tipo": inv["tipo"],
@@ -197,7 +228,13 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
         "snapshots": [{**s, "lido_em": s["lido_em"].isoformat()} for s in snaps],
         "eventos": {"total": len(brutos), "sha256": sha256(ev_bytes),
                     "formato": "RFC 8785, um por linha, ordenado por (_instancia, _realm, id)"},
-        "requisicoes": {"total": len(reqs), "sha256": sha256(req_bytes)},
+        "requisicoes": {"total": len(reqs), "sha256": sha256(req_bytes),
+                        "redigido": not sem_mascara,
+                        "formato": "um por linha; no pacote mascarado, caminho e parâmetros pessoais redigidos e "
+                                   "sha256 do arquivo original"},
+        "contas_excluidas": [{"id": c["id"], "instancia": c["instancia"], "realm": c["realm"], "via": c["via"],
+                              "conta": msk(c["username"]) if c["username"] else None, "eventos": c["eventos"],
+                              **({"user_id": c["user_id"]} if sem_mascara else {})} for c in excluidas],
         "cobertura": {"realms": list(fr["realms"]), "tempo": list(fr["tempo"])},
         "arquivos": {n: sha256(b) for n, b in arquivos.items()} | ({} if sem_mascara else
                                                                     {"eventos.jsonl": sha256(ev_bytes)}),

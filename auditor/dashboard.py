@@ -11,6 +11,16 @@ from .consolidar import ERROS, GLOSSARIO
 STATIC = Path(__file__).parent / "static" / "echarts.min.js"
 
 
+def _mascarar_json(obj, mascara):
+    """Aplica a máscara a todo texto de uma estrutura JSON. Eventos administrativos trazem em `representation` a
+    conta inteira serializada como texto, com o identificador dentro."""
+    if isinstance(obj, dict):
+        return {k: _mascarar_json(v, mascara) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_mascarar_json(v, mascara) for v in obj]
+    return mascara(obj) if isinstance(obj, str) else obj
+
+
 def gerar(d: dict, mascara) -> str:
     inv = d["inv"]
     tz = ZoneInfo(inv["fuso"])
@@ -29,7 +39,7 @@ def gerar(d: dict, mascara) -> str:
                "via": c["via"], "origem": c["origem"], "hab": c["habilitada"],
                "criado": dt(c["criado_ms"]), "inc": c["incluida"]} for c in d["contas"]]
     extras = [{"tipo": x["tipo"], "i": x["instancia"], "r": x["realm"], "u": mascara(x["username"]),
-               "em": x["capturado_em"].astimezone(tz).strftime("%d/%m/%Y %H:%M"), "d": x["dados"]}
+               "em": x["capturado_em"].astimezone(tz).strftime("%d/%m/%Y %H:%M"), "d": _mascarar_json(x["dados"], mascara)}
               for x in d["extras"]]
     dados = {
         "alvo": inv["alvo_mascarado"], "inicio": inv["inicio_ms"], "fim": inv["fim_ms"], "fuso": inv["fuso"],

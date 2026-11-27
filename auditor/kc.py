@@ -12,7 +12,7 @@ import httpx
 from psycopg.types.json import Jsonb
 
 from . import __version__
-from .cripto import decifrar
+from .cripto import ctx_segredo, decifrar
 from .db import conectar
 
 
@@ -71,7 +71,7 @@ class ClienteKC:
         self.inst = instancia
         self.investigacao_id = investigacao_id
         self.registrar = registrar
-        self.segredo = decifrar(instancia["segredo_cifrado"])
+        self.segredo = decifrar(instancia["segredo_cifrado"], ctx_segredo(instancia["nome"]))
         verify = instancia.get("ca_path") or True
         self.http = httpx.Client(base_url=instancia["url"].rstrip("/"), timeout=30.0, verify=verify,
                                  trust_env=False)

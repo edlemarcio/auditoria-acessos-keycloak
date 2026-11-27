@@ -128,6 +128,32 @@ Depois abra `saida/dashboard_3.html` no navegador. É um arquivo autocontido, se
 | `concluida` | Coleta completa, sem lacunas de cobertura |
 | `concluida_com_lacunas` | Coleta completa, mas parte da janela ou dos realms não tem dados (realm sem permissão, eventos desligados ou expirados, dia ainda aberto no modo `dia`) |
 
+## Atualização para a 0.2.0 (etapa W-0)
+
+A 0.2.0 corrige vazamentos do pacote mascarado e muda o formato das chaves. Numa base existente:
+
+```bash
+python -m auditor init          # com AUDITOR_CHAVE carregada: converte segredos e alvos para o formato v2
+```
+
+O `init` é idempotente. Na primeira vez, mostra o que converteu (`instancias`, `investigacoes`, `historico`).
+
+**Papel de banco da aplicação.** Depois do `init` com o papel dono, crie o papel sem DDL e sem permissão de alterar
+a trilha, e use-o no dia a dia:
+
+```bash
+psql postgresql://keycloak:keycloak@localhost:5435/auditor -v senha_app="'troque-esta-senha'" -f infra/papeis.sql
+export AUDITOR_DSN=postgresql://kc_auditor_app:troque-esta-senha@localhost:5435/auditor
+```
+
+Só o `init` precisa do papel dono.
+
+**Teste de aceite da W-0** (pacote mascarado sem identificador, contas excluídas, snapshots, chaves, trilha):
+
+```bash
+AUDITOR_DSN=<papel dono> AUDITOR_DSN_APP=<kc_auditor_app> python tests/w0.py <investigação>
+```
+
 ## Acessos da stack de teste
 
 | O quê | Endereço | Usuário | Senha |

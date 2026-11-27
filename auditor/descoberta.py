@@ -41,7 +41,7 @@ def avaliar_realm(config: dict | None, s5: dict, atributo: str) -> tuple[str, st
     return "ok", None, None
 
 
-def descobrir(cx, inst: dict, cli: ClienteKC) -> list[dict]:
+def descobrir(cx, inst: dict, cli: ClienteKC, investigacao_id: int | None = None) -> list[dict]:
     visiveis = {r["realm"] for r in cli.realms()}
     atributo = inst["mapeamento"].get("cpf", "cpf")
     saida = []
@@ -61,9 +61,9 @@ def descobrir(cx, inst: dict, cli: ClienteKC) -> list[dict]:
             st, det, acao = avaliar_realm(config, s5, atributo)
             snap = {"realm": realm, "visivel": True, "config": config, "s5": s5, "status": st, "detalhe": det,
                     "acao": acao}
-        cx.execute("INSERT INTO realm_snapshot (instancia_id, realm, visivel, config, user_profile, federacao, "
-                   "status, detalhe, acao) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                   (inst["id"], realm, snap["visivel"], Jsonb(snap["config"]),
+        cx.execute("INSERT INTO realm_snapshot (instancia_id, investigacao_id, realm, visivel, config, user_profile, "
+                   "federacao, status, detalhe, acao) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                   (inst["id"], investigacao_id, realm, snap["visivel"], Jsonb(snap["config"]),
                     Jsonb(snap["s5"].get("user_profile")), Jsonb(snap["s5"].get("federacao")),
                     snap["status"], snap["detalhe"], snap["acao"]))
         saida.append(snap)

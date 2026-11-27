@@ -23,6 +23,15 @@ from . import coleta, investigar
 from .db import conectar, criar_esquema, trilha
 
 
+def cmd_init(a):
+    feitos = criar_esquema()
+    print("esquema ok")
+    if feitos is None:
+        print("chaves: AUDITOR_CHAVE não definida; conversão para o formato v2 não verificada")
+    elif any(feitos.values()):
+        print(f"chaves convertidas para o formato v2: {feitos}")
+
+
 def cmd_chave(a):
     from .cripto import gerar_chaves
     k, d = gerar_chaves(Path(a.destino))
@@ -31,7 +40,7 @@ def cmd_chave(a):
 
 
 def cmd_instancia_add(a):
-    from .cripto import cifrar
+    from .cripto import cifrar, ctx_segredo
     from .descoberta import descobrir
     from .kc import ClienteKC
     from . import sondas
@@ -43,7 +52,7 @@ def cmd_instancia_add(a):
             "client_id=EXCLUDED.client_id, segredo_cifrado=EXCLUDED.segredo_cifrado, concorrencia=EXCLUDED.concorrencia,"
             " req_por_s=EXCLUDED.req_por_s, realms_esperados=EXCLUDED.realms_esperados, "
             "realm_homologacao=EXCLUDED.realm_homologacao, usuario_sonda=EXCLUDED.usuario_sonda RETURNING *",
-            (a.nome, a.url, a.realm_auth, a.client_id, cifrar(a.segredo), a.ca, a.concorrencia, a.req_por_s,
+            (a.nome, a.url, a.realm_auth, a.client_id, cifrar(a.segredo, ctx_segredo(a.nome)), a.ca, a.concorrencia, a.req_por_s,
              a.versao, a.realms_esperados.split(",") if a.realms_esperados else [], a.homologacao, a.sonda)
         ).fetchone()
         trilha(cx, a.operador, "cadastrar_instancia", nome=a.nome, url=a.url)
@@ -140,7 +149,7 @@ def main():
     ap = argparse.ArgumentParser(prog="auditor")
     sp = ap.add_subparsers(dest="cmd", required=True)
     p = sp.add_parser("chave"); p.add_argument("--destino", default="chaves"); p.set_defaults(f=cmd_chave)
-    p = sp.add_parser("init"); p.set_defaults(f=lambda a: (criar_esquema(), print("esquema ok")))
+    p = sp.add_parser("init"); p.set_defaults(f=cmd_init)
     p = sp.add_parser("instancia-add")
     for k in ("nome", "url", "client-id", "segredo"):
         p.add_argument(f"--{k}", required=True)

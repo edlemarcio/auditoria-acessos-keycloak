@@ -47,8 +47,6 @@ def _case_categoria() -> str:
 def extras_conta(inv_id: int):
     """Sessões ativas (fotografia) e alterações administrativas na conta (admin events)."""
     with conectar() as cx:
-        cx.execute("CREATE TABLE IF NOT EXISTS conta_extra (investigacao_id int, conta_id int, tipo text, "
-                   "capturado_em timestamptz DEFAULT now(), dados jsonb)")
         cx.execute("DELETE FROM conta_extra WHERE investigacao_id=%s", (inv_id,))
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
         contas = cx.execute("SELECT * FROM conta WHERE investigacao_id=%s AND incluida AND user_id IS NOT NULL",

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from psycopg.types.json import Jsonb
 
-from .db import conectar
+from .db import SNAPSHOTS_DA_INVESTIGACAO, conectar
 from .identificador import variantes
 from .kc import ClienteKC, ErroKC, FalhaTemporaria, SemPermissao
 
@@ -243,12 +243,13 @@ def executar(inv_id: int, threads: int | None = None, parar_apos: int | None = N
         insts = {i["id"]: i for i in cx.execute("SELECT * FROM instancia").fetchall()}
         contas = {c["id"]: c for c in cx.execute("SELECT * FROM conta WHERE investigacao_id=%s", (inv_id,))}
         exp = {(s["instancia_id"], s["realm"]): (s["config"] or {}).get("eventsExpiration")
-               for s in cx.execute("SELECT DISTINCT ON (instancia_id, realm) * FROM realm_snapshot "
-                                   "ORDER BY instancia_id, realm, lido_em DESC")}
+               for s in cx.execute("SELECT DISTINCT ON (instancia_id, realm) * FROM realm_snapshot s WHERE "
+                                   + SNAPSHOTS_DA_INVESTIGACAO + " ORDER BY instancia_id, realm, lido_em DESC",
+                                   {"inv": inv_id})}
     alvo = None
     if inv["parametros"].get("varredura"):
-        from .cripto import decifrar
-        alvo = (inv["tipo"], decifrar(inv["alvo_cifrado"]))
+        from .cripto import ctx_alvo, decifrar
+        alvo = (inv["tipo"], decifrar(inv["alvo_cifrado"], ctx_alvo(inv["alvo_hmac"])))
     clientes = {i: ClienteKC(insts[i], inv_id) for i in {c["instancia_id"] for c in contas.values()}}
     n = threads or max(1, min(8, sum(insts[i]["concorrencia"] for i in clientes)))
     feitas = [0]
