@@ -102,6 +102,21 @@ encontrada e, no fim, mostra o número da investigação.
 | `--base-dias 30` | Coleta também os 30 dias anteriores ao `--de` como período de base e destaca os IPs que não aparecem nesse período ("IP novo") |
 | `--threads N` | Paralelismo da coleta (o orçamento de carga por instância continua valendo) |
 
+**Com o worker** (W0a). Em vez de coletar no próprio terminal, a investigação pode ir para a fila, atendida por um
+worker contínuo que serve todas as investigações em rodízio:
+
+```bash
+python -m auditor worker --threads 4 &                       # deixe rodando
+python -m auditor investigar --cpf 770.914.534-50 --de 2026-09-01 --ate 2026-11-26 \
+  --operador seu.nome --justificativa "Processo 1234/2026" --fila
+python -m auditor pausar --id 3 --operador seu.nome           # para no próximo checkpoint, sem perder nada
+python -m auditor retomar --id 3 --operador seu.nome --fila   # volta para a fila do worker
+python -m auditor cancelar --id 3 --operador seu.nome --motivo "Pedido duplicado"
+```
+
+O worker prepara, coleta e fecha a investigação sozinho; o estado aparece em `investigacao.status`. Sem `--fila`,
+`investigar` e `retomar` funcionam como antes, coletando no terminal pela mesma fila.
+
 Se a coleta for interrompida, retome pelo número:
 
 ```bash
@@ -161,6 +176,13 @@ instância; nenhuma janela de 1 s passa de `req_por_s` e as simultâneas não pa
 
 ```bash
 AUDITOR_DSN=<kc_auditor_app> python tests/orcamento.py kc26 3 3 12
+```
+
+**Teste da fila e do worker** (W0a): rodízio entre duas investigações, pausa, retomada com fechamento automático e
+contagem id a id, e cancelamento:
+
+```bash
+AUDITOR_DSN=<kc_auditor_app> KC_DSN_kc26=... KC_DSN_kc18=... python tests/fila.py 20
 ```
 
 ## Acessos da stack de teste

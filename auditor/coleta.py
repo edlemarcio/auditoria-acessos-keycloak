@@ -5,7 +5,6 @@ posição dentro do dia em ordem decrescente (modo dia), gravado a cada página.
 """
 from __future__ import annotations
 
-import json
 import threading
 import time
 import zlib
@@ -58,6 +57,14 @@ def planejar(cx, inv: dict, contas: list[dict], insts: dict[int, dict], snaps: d
 
 
 # ------------------------------------------------------------------ execução de uma fatia
+class Interrompida(Exception):
+    """A investigação foi pausada ou cancelada durante a coleta da fatia."""
+
+    def __init__(self, estado: str):
+        super().__init__(estado)
+        self.estado = estado
+
+
 class Coletor:
     def __init__(self, cx, cli: ClienteKC, inv: dict, conta: dict, tarefa: dict, inst: dict, alvo: tuple | None):
         self.cx, self.cli, self.inv, self.conta, self.t, self.inst = cx, cli, inv, conta, tarefa, inst
@@ -103,6 +110,10 @@ class Coletor:
         self.cx.execute(f"UPDATE tarefa SET {sets}, lease_ate=now()+%s, atualizado=now() WHERE id=%s",
                         (*campos.values(), LEASE, self.t["id"]))
         self.t.update(campos)
+        # pausar e cancelar valem a partir da próxima página: o cursor acabou de ser salvo
+        st = self.cx.execute("SELECT status FROM investigacao WHERE id=%s", (self.inv["id"],)).fetchone()["status"]
+        if st in ESTADOS_PARADA:
+            raise Interrompida(st)
 
     # ---- modos epoch: cursor de tempo
     def _pontual(self, T: int) -> list[dict]:
@@ -222,83 +233,149 @@ class Coletor:
 
 
 # ------------------------------------------------------------------ fila de tarefas
-def _pegar_tarefa(cx, inv_id: int):
+CHAVE_INV = 0x6B64   # namespace dos advisory locks por investigação ("kd")
+ESTADOS_PARADA = ("pausada", "cancelada")
+
+
+def pegar_tarefa(cx, inv_id: int | None = None):
+    """Próxima tarefa pendente de investigações em coleta, com rodízio: prioridade maior primeiro e, dentro dela,
+    a investigação atendida há mais tempo. Com `inv_id`, só daquela investigação (CLI)."""
     with cx.transaction():
-        r = cx.execute("SELECT * FROM tarefa WHERE investigacao_id=%s AND status='pendente' "
-                       "ORDER BY inicio_ms, id FOR UPDATE SKIP LOCKED LIMIT 1", (inv_id,)).fetchone()
-        if r:
-            cx.execute("UPDATE tarefa SET status='executando', tentativas=tentativas+1, lease_ate=now()+%s "
-                       "WHERE id=%s", (LEASE, r["id"]))
-        return r
+        t = cx.execute("""
+            WITH c AS (
+              SELECT t.id FROM tarefa t JOIN investigacao i ON i.id = t.investigacao_id
+              WHERE t.status = 'pendente' AND i.status = 'coletando'
+                AND (%(inv)s::int IS NULL OR t.investigacao_id = %(inv)s)
+              ORDER BY i.prioridade DESC, i.ultimo_atendimento NULLS FIRST, t.inicio_ms, t.id
+              FOR UPDATE OF t SKIP LOCKED LIMIT 1)
+            UPDATE tarefa t SET status = 'executando', tentativas = t.tentativas + 1, lease_ate = now() + %(lease)s
+            FROM c WHERE t.id = c.id RETURNING t.*""", {"inv": inv_id, "lease": LEASE}).fetchone()
+        if t:
+            cx.execute("UPDATE investigacao SET ultimo_atendimento = clock_timestamp() WHERE id = %s",
+                       (t["investigacao_id"],))
+        return t
 
 
-def executar(inv_id: int, threads: int | None = None, parar_apos: int | None = None, progresso=None):
-    """Executa (ou retoma) as tarefas pendentes da investigação."""
-    with conectar() as cx:
-        # retomada após queda: tarefas 'executando' com lease vencido voltam para a fila
-        cx.execute("UPDATE tarefa SET status='pendente' WHERE investigacao_id=%s AND status='executando' "
-                   "AND lease_ate < now()", (inv_id,))
-        cx.execute("UPDATE investigacao SET status='coletando' WHERE id=%s", (inv_id,))
-        inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
-        insts = {i["id"]: i for i in cx.execute("SELECT * FROM instancia").fetchall()}
-        contas = {c["id"]: c for c in cx.execute("SELECT * FROM conta WHERE investigacao_id=%s", (inv_id,))}
-        exp = {(s["instancia_id"], s["realm"]): (s["config"] or {}).get("eventsExpiration")
-               for s in cx.execute("SELECT DISTINCT ON (instancia_id, realm) * FROM realm_snapshot s WHERE "
-                                   + SNAPSHOTS_DA_INVESTIGACAO + " ORDER BY instancia_id, realm, lido_em DESC",
-                                   {"inv": inv_id})}
+def devolver_leases_vencidos(cx, inv_id: int | None = None):
+    """Retomada após queda: tarefas 'executando' com lease vencido voltam para a fila."""
+    cx.execute("UPDATE tarefa SET status='pendente' WHERE status='executando' AND lease_ate < now() "
+               "AND (%(inv)s::int IS NULL OR investigacao_id = %(inv)s)", {"inv": inv_id})
+
+
+class Clientes:
+    """Clientes da Admin API por (instância, investigação), reaproveitados entre tarefas de uma thread."""
+
+    def __init__(self):
+        self._c: dict[tuple[int, int], ClienteKC] = {}
+
+    def de(self, inst: dict, inv_id: int) -> ClienteKC:
+        k = (inst["id"], inv_id)
+        if k not in self._c:
+            self._c[k] = ClienteKC(inst, inv_id)
+        return self._c[k]
+
+    def fechar(self, inv_id: int | None = None):
+        for k in [k for k in self._c if inv_id is None or k[1] == inv_id]:
+            self._c.pop(k).fechar()
+
+
+def executar_tarefa(cx, t: dict, clientes: Clientes) -> str:
+    """Executa uma fatia já reservada (status 'executando') e grava o resultado. Devolve o novo status."""
+    inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (t["investigacao_id"],)).fetchone()
+    conta = cx.execute("SELECT * FROM conta WHERE id=%s", (t["conta_id"],)).fetchone()
+    inst = cx.execute("SELECT * FROM instancia WHERE id=%s", (conta["instancia_id"],)).fetchone()
+    snap = cx.execute("SELECT config FROM realm_snapshot s WHERE s.instancia_id=%(i)s AND s.realm=%(r)s AND "
+                      + SNAPSHOTS_DA_INVESTIGACAO + " ORDER BY lido_em DESC LIMIT 1",
+                      {"i": inst["id"], "r": conta["realm"], "inv": inv["id"]}).fetchone()
+    expiracao = ((snap or {}).get("config") or {}).get("eventsExpiration")
     alvo = None
     if inv["parametros"].get("varredura"):
         from .cripto import ctx_alvo, decifrar
         alvo = (inv["tipo"], decifrar(inv["alvo_cifrado"], ctx_alvo(inv["alvo_hmac"])))
-    clientes = {i: ClienteKC(insts[i], inv_id) for i in {c["instancia_id"] for c in contas.values()}}
-    n = threads or max(1, min(8, sum(insts[i]["concorrencia"] for i in clientes)))
+    col = Coletor(cx, clientes.de(inst, inv["id"]), inv, conta, t, inst, alvo)
+    try:
+        col.rodar()
+        rel = col.reler(expiracao) if col.precisa_reler(expiracao) else None
+        n_ev = cx.execute("SELECT count(*) AS n FROM evento WHERE investigacao_id=%s AND conta_id=%s "
+                          "AND time_ms>=%s AND time_ms<%s",
+                          (inv["id"], conta["id"], t["inicio_ms"], t["fim_ms"])).fetchone()["n"]
+        status = "limite" if col.limite_atingido else "concluida"
+        cx.execute("UPDATE tarefa SET status=%s, releitura=%s, eventos=%s, erro=NULL, atualizado=now() "
+                   "WHERE id=%s", (status, rel, n_ev, t["id"]))
+    except Interrompida as e:
+        # pausa: volta à fila com o cursor salvo no último checkpoint; cancelamento: encerra a fatia
+        status = "pendente" if e.estado == "pausada" else "cancelada"
+        cx.execute("UPDATE tarefa SET status=%s, tentativas=tentativas-1, lease_ate=NULL WHERE id=%s",
+                   (status, t["id"]))
+    except SemPermissao as e:
+        status = "sem_permissao"
+        cx.execute("UPDATE tarefa SET status='sem_permissao', erro=%s WHERE id=%s", (str(e), t["id"]))
+    except Exception as e:  # noqa: BLE001 — erro inesperado não pode deixar a fatia presa em 'executando'
+        status = "falhou" if t["tentativas"] >= 3 else "pendente"
+        erro = str(e) if isinstance(e, (FalhaTemporaria, ErroKC)) else f"{type(e).__name__}: {e}"
+        cx.execute("UPDATE tarefa SET status=%s, erro=%s WHERE id=%s", (status, erro[:500], t["id"]))
+    return status
+
+
+def concluir_se_terminou(cx, inv_id: int, enfileirar_fechamento: bool = True) -> bool:
+    """Sem tarefas pendentes ou em execução, a investigação em coleta passa a 'coletada' e (no modo worker)
+    ganha um job de fechamento. Protegido por lock por investigação: só um processo conclui."""
+    with cx.transaction():
+        cx.execute("SELECT pg_advisory_xact_lock(%s, %s)", (CHAVE_INV, inv_id))
+        st = cx.execute("SELECT status FROM investigacao WHERE id=%s FOR UPDATE", (inv_id,)).fetchone()["status"]
+        if st != "coletando":
+            return False
+        pend = cx.execute("SELECT count(*) AS n FROM tarefa WHERE investigacao_id=%s AND status IN "
+                          "('pendente','executando')", (inv_id,)).fetchone()["n"]
+        if pend:
+            return False
+        cx.execute("UPDATE investigacao SET status='coletada' WHERE id=%s", (inv_id,))
+        if enfileirar_fechamento:
+            cx.execute("INSERT INTO job (tipo, investigacao_id) VALUES ('fechar', %s) ON CONFLICT DO NOTHING",
+                       (inv_id,))
+        return True
+
+
+def executar(inv_id: int, threads: int | None = None, parar_apos: int | None = None, progresso=None):
+    """CLI: executa (ou retoma) as tarefas pendentes de uma investigação, pela mesma fila do worker."""
+    with conectar() as cx:
+        devolver_leases_vencidos(cx, inv_id)
+        # pausada e cancelada não são retomadas aqui: isso é `servicos.retomar`
+        cx.execute("UPDATE investigacao SET status='coletando' WHERE id=%s AND status IN ('na_fila','parcial')",
+                   (inv_id,))
+        insts = {r["instancia_id"]: r for r in cx.execute(
+            "SELECT DISTINCT c.instancia_id, i.concorrencia FROM conta c JOIN instancia i ON i.id=c.instancia_id "
+            "WHERE c.investigacao_id=%s", (inv_id,))}
+    n = threads or max(1, min(8, sum(i["concorrencia"] for i in insts.values())))
     feitas = [0]
     lock = threading.Lock()
 
     def trabalhador():
-        with conectar() as cx:
-            while True:
-                with lock:
-                    if parar_apos is not None and feitas[0] >= parar_apos:
+        clientes = Clientes()
+        try:
+            with conectar() as cx:
+                while True:
+                    with lock:
+                        if parar_apos is not None and feitas[0] >= parar_apos:
+                            return
+                    t = pegar_tarefa(cx, inv_id)
+                    if not t:
                         return
-                t = _pegar_tarefa(cx, inv_id)
-                if not t:
-                    return
-                conta = contas[t["conta_id"]]
-                inst = insts[conta["instancia_id"]]
-                col = Coletor(cx, clientes[inst["id"]], inv, conta, t, inst, alvo)
-                try:
-                    col.rodar()
-                    expiracao = exp.get((inst["id"], conta["realm"]))
-                    rel = col.reler(expiracao) if col.precisa_reler(expiracao) else None
-                    n_ev = cx.execute("SELECT count(*) AS n FROM evento WHERE investigacao_id=%s AND conta_id=%s "
-                                      "AND time_ms>=%s AND time_ms<%s",
-                                      (inv_id, conta["id"], t["inicio_ms"], t["fim_ms"])).fetchone()["n"]
-                    status = "limite" if col.limite_atingido else "concluida"
-                    cx.execute("UPDATE tarefa SET status=%s, releitura=%s, eventos=%s, erro=NULL, atualizado=now() "
-                               "WHERE id=%s", (status, rel, n_ev, t["id"]))
-                except SemPermissao as e:
-                    cx.execute("UPDATE tarefa SET status='sem_permissao', erro=%s WHERE id=%s", (str(e), t["id"]))
-                except (FalhaTemporaria, ErroKC) as e:
-                    novo = "falhou" if t["tentativas"] >= 3 else "pendente"
-                    cx.execute("UPDATE tarefa SET status=%s, erro=%s WHERE id=%s", (novo, str(e)[:500], t["id"]))
-                with lock:
-                    feitas[0] += 1
-                    if progresso:
-                        progresso(feitas[0])
+                    executar_tarefa(cx, t, clientes)
+                    with lock:
+                        feitas[0] += 1
+                        if progresso:
+                            progresso(feitas[0])
+        finally:
+            clientes.fechar()
 
     ths = [threading.Thread(target=trabalhador, daemon=True) for _ in range(n)]
     for th in ths:
         th.start()
     for th in ths:
         th.join()
-    for c in clientes.values():
-        c.fechar()
     with conectar() as cx:
-        pend = cx.execute("SELECT count(*) AS n FROM tarefa WHERE investigacao_id=%s AND status IN "
-                          "('pendente','executando')", (inv_id,)).fetchone()["n"]
-        if pend == 0:
-            cx.execute("UPDATE investigacao SET status='coletada' WHERE id=%s", (inv_id,))
-        else:
-            cx.execute("UPDATE investigacao SET status='parcial' WHERE id=%s", (inv_id,))
+        if not concluir_se_terminou(cx, inv_id, enfileirar_fechamento=False):
+            # parou antes do fim: 'parcial', salvo se foi pausada ou cancelada
+            cx.execute("UPDATE investigacao SET status='parcial' WHERE id=%s AND status='coletando'", (inv_id,))
     return feitas[0]
