@@ -1,6 +1,7 @@
 """Ciclo de uma investigação: abrir, preparar (descoberta + localização + plano), coletar, fechar cobertura."""
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -8,7 +9,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Jsonb
 
 from . import coleta, descoberta
-from . import chaves
+from . import chaves, cripto, sigilo
 from .db import SNAPSHOTS_DA_INVESTIGACAO, conectar, trilha
 from .identificador import mascarar, normalizar
 from .kc import ClienteKC
@@ -34,13 +35,15 @@ def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str,
         # 'abrindo' até a DEK existir: o chaveiro só cria DEK de investigação em abertura e o alvo é cifrado com ela
         r = cx.execute("INSERT INTO investigacao (operador, justificativa, tipo, alvo_cifrado, alvo_hmac, "
                        "alvo_mascarado, inicio_ms, fim_ms, fuso, granularidade, parametros, execucao_anterior, status) "
-                       "VALUES (%s,%s,%s,''::bytea,%s,%s,%s,%s,%s,%s,%s,%s,'abrindo') RETURNING id",
-                       (operador, justificativa, tipo, h, mascarar(tipo, dig), ini, fim_, fuso, granularidade,
+                       "VALUES (%s,'',%s,''::bytea,%s,%s,%s,%s,%s,%s,%s,%s,'abrindo') RETURNING id",
+                       (operador, tipo, h, mascarar(tipo, dig), ini, fim_, fuso, granularidade,
                         Jsonb({"instancias": instancias, "varredura": varredura, "base_dias": base_dias}),
                         anterior)).fetchone()
         dek = chaves.criar_deks(cx, r["id"])
-        cx.execute("UPDATE investigacao SET alvo_cifrado=%s, status='na_fila' WHERE id=%s",
-                   (chaves.cifrar_alvo(r["id"], dek, dig), r["id"]))
+        cx.execute("UPDATE investigacao SET alvo_cifrado=%s, justificativa_cifrada=%s, status='na_fila' WHERE id=%s",
+                   (chaves.cifrar_alvo(r["id"], dek, dig),
+                    cripto.cifrar_dek(dek, json.dumps(justificativa, ensure_ascii=False),
+                                      cripto.aad(r["id"], "investigacao", "justificativa", r["id"])), r["id"]))
         trilha(cx, operador, "abrir_investigacao", r["id"], tipo=tipo, alvo=mascarar(tipo, dig),
                justificativa=justificativa, inicio=inicio, fim=fim)
         return r["id"]
@@ -51,6 +54,7 @@ def preparar(inv_id: int, contas_informadas: list[tuple[str, str, str]] | None =
     with conectar() as cx:
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
         dig = chaves.alvo(inv, "preparar")
+        cf = sigilo.Cofre(inv_id, "preparar")
         nomes = inv["parametros"].get("instancias")
         insts = [i for i in cx.execute("SELECT * FROM instancia ORDER BY id").fetchall()
                  if not nomes or i["nome"] in nomes]
@@ -67,36 +71,33 @@ def preparar(inv_id: int, contas_informadas: list[tuple[str, str, str]] | None =
                 cli.fechar()
             for u in achadas:
                 fed = "LDAP" if u.get("federationLink") else "local"
-                cx.execute("INSERT INTO conta (investigacao_id, instancia_id, realm, user_id, username, email, "
-                           "criado_ms, habilitada, origem, via) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                           "ON CONFLICT DO NOTHING",
-                           (inv_id, inst["id"], u["realm"], u["id"], u["username"], u.get("email"),
-                            u.get("createdTimestamp"), u.get("enabled"), fed, u["via"]))
-                cx.execute("INSERT INTO historico_identidade (alvo_hmac, instancia_id, realm, user_id, username) "
-                           "VALUES (%s,%s,%s,%s,%s) ON CONFLICT (alvo_hmac, instancia_id, realm, user_id) "
-                           "DO UPDATE SET visto_em=now()", (inv["alvo_hmac"], inst["id"], u["realm"], u["id"],
-                                                            u["username"]))
+                sigilo.inserir_conta(cx, cf, inst["id"], u["realm"], u["id"], u["username"], u.get("email"),
+                                     u.get("createdTimestamp"), u.get("enabled"), fed, u["via"])
+                hist = (inv_id, inv["alvo_hmac"], inst["id"], u["realm"])
+                cx.execute("INSERT INTO historico_identidade (alvo_hmac, instancia_id, realm, uid_hmac, cifrado) "
+                           "VALUES (%s,%s,%s,%s,%s) ON CONFLICT (alvo_hmac, instancia_id, realm, uid_hmac) "
+                           "DO UPDATE SET visto_em=now(), cifrado=EXCLUDED.cifrado",
+                           (inv["alvo_hmac"], inst["id"], u["realm"], chaves.hmac_historico(*hist, u["id"]),
+                            chaves.cifrar_historico(*hist, {"user_id": u["id"], "username": u["username"]})))
             # contas vistas em investigações anteriores e que não existem mais (excluídas)
             for h in cx.execute("SELECT * FROM historico_identidade WHERE alvo_hmac=%s AND instancia_id=%s",
                                 (inv["alvo_hmac"], inst["id"])).fetchall():
-                cx.execute("INSERT INTO conta (investigacao_id, instancia_id, realm, user_id, username, origem, via)"
-                           " VALUES (%s,%s,%s,%s,%s,'histórico','historico') ON CONFLICT DO NOTHING",
-                           (inv_id, inst["id"], h["realm"], h["user_id"], h["username"]))
+                if h["cifrado"] is not None:
+                    h = {**h, **chaves.decifrar_historico(inv_id, inv["alvo_hmac"], inst["id"], h["realm"],
+                                                          h["cifrado"])}
+                sigilo.inserir_conta(cx, cf, inst["id"], h["realm"], h["user_id"], h["username"],
+                                     origem="histórico", via="historico")
             for nome_inst, realm, uid in contas_informadas or []:
                 if nome_inst == inst["nome"] and uid == "*":   # realm inteiro (teste de carga)
-                    cx.execute("INSERT INTO conta (investigacao_id, instancia_id, realm, user_id, username, origem, via)"
-                               " VALUES (%s,%s,%s,NULL,'(realm inteiro)','teste','realm') ON CONFLICT DO NOTHING",
-                               (inv_id, inst["id"], realm))
+                    sigilo.inserir_conta(cx, cf, inst["id"], realm, None, "(realm inteiro)", origem="teste",
+                                         via="realm")
                 elif nome_inst == inst["nome"]:
-                    cx.execute("INSERT INTO conta (investigacao_id, instancia_id, realm, user_id, origem, via) "
-                               "VALUES (%s,%s,%s,%s,'informada','informada') ON CONFLICT DO NOTHING",
-                               (inv_id, inst["id"], realm, uid))
+                    sigilo.inserir_conta(cx, cf, inst["id"], realm, uid, None, origem="informada", via="informada")
             if inv["parametros"].get("varredura"):
                 for s in realms:
                     if s["visivel"] and s["status"] in ("ok", "federacao_sem_importacao"):
-                        cx.execute("INSERT INTO conta (investigacao_id, instancia_id, realm, user_id, username, "
-                                   "origem, via) VALUES (%s,%s,%s,NULL,'(falhas sem userId)','varredura',"
-                                   "'varredura') ON CONFLICT DO NOTHING", (inv_id, inst["id"], s["realm"]))
+                        sigilo.inserir_conta(cx, cf, inst["id"], s["realm"], None, "(falhas sem userId)",
+                                             origem="varredura", via="varredura")
             resumo["instancias"][inst["nome"]] = {"realms": len(realms), "erros": erros,
                                                   "contas": len(achadas)}
         contas = cx.execute("SELECT * FROM conta WHERE investigacao_id=%s", (inv_id,)).fetchall()

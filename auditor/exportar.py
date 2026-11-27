@@ -4,7 +4,6 @@ from __future__ import annotations
 import csv
 import io
 import json
-import re
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,30 +14,29 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
-from . import __version__, dashboard
+from . import __version__, dashboard, redigir, sigilo
 from .consolidar import ERROS, GLOSSARIO, categoria, consolidar, nome_evento
 from .chaves import alvo as alvo_de
 from .db import SNAPSHOTS_DA_INVESTIGACAO, conectar, trilha
 from .identificador import mascarar_texto
 from .manifesto import assinar_manifesto, linhas_eventos, sha256
+from .pseudonimos import Visao, atribuir, rotulos
 
 LIMITE_LINHAS = 1_048_575
 CLASSE = {"coberto": "Coberto", "parcial": "Parcial", "sem_dados": "Sem dados"}
 
 
-# parâmetros técnicos da Admin API; qualquer outro (user, username, q, search, email, resourcePath...) é redigido
-PARAMS_TECNICOS = {"type", "dateFrom", "dateTo", "first", "max", "direction", "exact", "briefRepresentation",
-                   "client", "operationTypes", "resourceTypes", "enabled"}
-REDIGIDO = "[redigido]"
+PARAMS_TECNICOS, REDIGIDO = redigir.PARAMS_TECNICOS, redigir.REDIGIDO
 
 
 def redigir_requisicao(r: dict, msk) -> dict:
     """Versão da requisição para o pacote mascarado: sem userId no caminho e sem parâmetros pessoais."""
-    caminho = re.sub(r"/users/[^/?]+", f"/users/{REDIGIDO}", r["caminho"])
-    params = r["params"]
-    if isinstance(params, dict):
-        params = {k: (v if k in PARAMS_TECNICOS else REDIGIDO) for k, v in params.items()}
-    return {**r, "caminho": msk(caminho), "params": params}
+    return {**r, "caminho": msk(redigir.caminho(r["caminho"])), "params": redigir.params(r["params"])}
+
+
+def _conta_do_evento(e: dict) -> dict:
+    return {"username": e.get("username"), "ps_conta": e.get("conta_ps"), "via": e.get("via"),
+            "user_id": e.get("user_id")}
 
 
 def _linhas_requisicoes(reqs) -> bytes:
@@ -85,22 +83,34 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
     with conectar() as cx:
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
     dig = alvo_de(inv, "exportar")
+    cf = sigilo.Cofre(inv_id, "exportar")
     tz = ZoneInfo(inv["fuso"])
     msk = (lambda s: s) if sem_mascara else (lambda s: mascarar_texto(s, inv["tipo"], dig))
-    d = consolidar(inv_id)
     with conectar() as cx:
-        d["base_eventos"] = cx.execute("SELECT ip FROM evento WHERE investigacao_id=%s AND time_ms < %s",
-                                       (inv_id, inv["inicio_ms"])).fetchall()
+        atribuir(cx, cf)   # numeração dos pseudônimos (idempotente; normalmente já feita no fechamento)
+        rot = rotulos(cx, inv_id)
+    d = consolidar(inv_id)
+    vis = Visao(sem_mascara, msk, rot, cf)
+    vis.conhecer(d["contas"], d["eventos"])
+    with conectar() as cx:
+        d["base_eventos"] = [sigilo.abrir_evento(cf, r) for r in cx.execute(
+            "SELECT id, instancia_id, realm, cifrado, ps_ip, ip FROM evento WHERE investigacao_id=%s AND time_ms < %s",
+            (inv_id, inv["inicio_ms"])).fetchall()]
         # mesmo conjunto da planilha e do dashboard: só eventos de contas incluídas (D2)
-        brutos = cx.execute("SELECT e.bruto, i.nome AS inst, e.realm FROM evento e JOIN instancia i "
-                            "ON i.id=e.instancia_id JOIN conta c ON c.id=e.conta_id "
-                            "WHERE e.investigacao_id=%s AND c.incluida", (inv_id,)).fetchall()
-        excluidas = cx.execute("SELECT c.id, i.nome AS instancia, c.realm, c.user_id, c.username, c.via, "
-                               "(SELECT count(*) FROM evento e WHERE e.conta_id=c.id) AS eventos "
-                               "FROM conta c JOIN instancia i ON i.id=c.instancia_id "
-                               "WHERE c.investigacao_id=%s AND NOT c.incluida ORDER BY c.id", (inv_id,)).fetchall()
-        reqs = cx.execute("SELECT id, caminho, params, status, inicio, ms, sha256, bytes, coletor FROM requisicao "
-                          "WHERE investigacao_id=%s ORDER BY id", (inv_id,)).fetchall()
+        brutos = [sigilo.abrir_evento(cf, r) for r in cx.execute(
+            "SELECT e.id, e.instancia_id, e.cifrado, e.bruto, i.nome AS inst, e.realm FROM evento e JOIN instancia i "
+            "ON i.id=e.instancia_id JOIN conta c ON c.id=e.conta_id "
+            "WHERE e.investigacao_id=%s AND c.incluida", (inv_id,)).fetchall()]
+        n_ev = {r["conta_id"]: r["n"] for r in cx.execute(
+            "SELECT conta_id, count(*) n FROM evento WHERE investigacao_id=%s GROUP BY 1", (inv_id,))}
+        excluidas = [{**c, "eventos": n_ev.get(c["id"], 0)} for c in d["contas"] if not c["incluida"]]
+        reqs = []
+        for r in cx.execute("SELECT id, caminho, params, status, inicio, ms, sha256, bytes, coletor, cifrado "
+                            "FROM requisicao WHERE investigacao_id=%s ORDER BY id", (inv_id,)).fetchall():
+            if r["cifrado"] is not None:   # original (o claro é a versão redigida)
+                r.update(cf.decifrar("requisicao", "cifrado", r["id"], r["cifrado"]))
+            del r["cifrado"]
+            reqs.append(r)
         insts = cx.execute("SELECT nome, url, versao_declarada, sondas FROM instancia").fetchall()
         # só os snapshots lidos por esta investigação (D3)
         snaps = cx.execute("SELECT i.nome, s.realm, s.lido_em, s.visivel, s.config, s.user_profile, s.federacao, "
@@ -127,8 +137,9 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
     leia += [[f"Erro {k}", v] for k, v in ERROS.items()]
     _aba(wb, "Leia-me", ["Item", "Descrição"], leia, {0: 30, 1: 100})
     k = d["kpis"]
+    justificativa = sigilo.justificativa(cf, inv)
     par = [["Investigação", inv_id], ["Alvo", inv["alvo_mascarado"] if not sem_mascara else dig],
-           ["Justificativa", inv["justificativa"]], ["Operador", inv["operador"]],
+           ["Justificativa", vis.texto(justificativa)], ["Operador", inv["operador"]],
            ["Exportado por", operador], ["Exportado em", datetime.now(tz).replace(tzinfo=None)],
            ["Período início", _naive(inv["inicio_ms"], tz)], ["Período fim (exclusivo)", _naive(inv["fim_ms"], tz)],
            ["Fuso", inv["fuso"]], ["Granularidade", inv["granularidade"]], ["Filtros aplicados", filtros],
@@ -151,38 +162,42 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
          [[r["instancia"], r["realm"], r["client_id"], r["logins"], r["falhas"], _naive(r["primeiro"], tz),
            _naive(r["ultimo"], tz)] for r in d["por_app"]], fmt_data=(5, 6), num=(3, 4))
     _aba(wb, "Por IP", ["IP", "Eventos", "Falhas de login", "Primeiro", "Último", "Onde"],
-         [[r["ip"], r["n"], r["falhas"], _naive(r["primeiro"], tz), _naive(r["ultimo"], tz), r["onde"]]
+         [[vis.ip(r["ps_ip"], r["ip"]), r["n"], r["falhas"], _naive(r["primeiro"], tz), _naive(r["ultimo"], tz),
+           r["onde"]]
           for r in d["por_ip"]], {5: 50}, fmt_data=(3, 4), num=(1, 2))
-    dest = [["Fora do expediente", _naive(e["time_ms"], tz), e["instancia"], e["realm"], msk(e["username"]),
-             e["client_id"], e["ip"], ""] for e in d["fora"]]
-    dest += [["Rajada de falhas", _naive(r["inicio"], tz), r["instancia"], r["realm"], msk(r["username"]), "",
-              ", ".join(r["ips"]), f"{r['n']} falhas até {_naive(r['fim'], tz):%d/%m/%Y %H:%M:%S}"] for r in d["rajadas"]]
+    dest = [["Fora do expediente", _naive(e["time_ms"], tz), e["instancia"], e["realm"], vis.conta(_conta_do_evento(e)),
+             e["client_id"], vis.ip(e["ps_ip"], e["ip"]), ""] for e in d["fora"]]
+    dest += [["Rajada de falhas", _naive(r["inicio"], tz), r["instancia"], r["realm"],
+              vis.conta(_conta_do_evento(r["conta"])), "", ", ".join(vis.ip(ps, ip) for ps, ip in r["ips"]),
+              f"{r['n']} falhas até {_naive(r['fim'], tz):%d/%m/%Y %H:%M:%S}"] for r in d["rajadas"]]
     if d["ip_novo"] is None:
         dest.append(["IP novo", None, "", "", "", "", "", "sem base de comparação"])
     else:
-        dest += [["IP novo", _naive(e["time_ms"], tz), e["instancia"], e["realm"], msk(e["username"]), e["client_id"],
-                  e["ip"], "primeira ocorrência"] for e in d["ip_novo"]]
+        dest += [["IP novo", _naive(e["time_ms"], tz), e["instancia"], e["realm"], vis.conta(_conta_do_evento(e)),
+                  e["client_id"], vis.ip(e["ps_ip"], e["ip"]), "primeira ocorrência"] for e in d["ip_novo"]]
     _aba(wb, "Destaques", ["Destaque", "Data e hora", "Instância", "Realm", "Conta", "Aplicação", "IP", "Observação"],
          dest, {7: 40}, fmt_data=(1,))
     det = []
     for e in d["eventos"]:
         dd = e["details"] or {}
         det.append([_naive(e["time_ms"], tz), inv["fuso"], datetime.fromtimestamp(e["time_ms"] / 1000, timezone.utc)
-                    .replace(tzinfo=None), e["instancia"], e["realm"], msk(e["username"]), nome_evento(e["type"]),
-                    e["type"], e["client_id"], e["ip"], e["session_id"], ERROS.get(e["error"], e["error"] or ""),
-                    e["error"], dd.get("auth_method"), msk(dd.get("redirect_uri")), e["id"]])
+                    .replace(tzinfo=None), e["instancia"], e["realm"], vis.conta(_conta_do_evento(e)),
+                    nome_evento(e["type"]), e["type"], e["client_id"], vis.ip(e["ps_ip"], e["ip"]),
+                    vis.sessao(e["ps_sessao"], e["session_id"]), ERROS.get(e["error"], e["error"] or ""),
+                    e["error"], dd.get("auth_method"), vis.texto(dd.get("redirect_uri")), e["id"]])
     _aba(wb, "Eventos detalhados", ["Data e hora local", "Fuso", "Data e hora UTC", "Instância", "Realm", "Conta",
                                     "Evento", "Código", "Aplicação", "IP", "Sessão", "Erro", "Código do erro",
                                     "Método", "Endereço de retorno", "ID do evento"], det, {14: 40, 15: 38},
          fmt_data=(0, 2))
     _aba(wb, "Cobertura", ["Instância", "Realm", "Conta", "Classe", "Status", "Situação", "Próximo passo", "Coberto desde"],
-         [[c["instancia"], c["realm"], msk(c["username"]) if c["username"] else "—", CLASSE[c["classe"]], c["status"],
-           msk(c["detalhe"]), c["acao"], _naive(c["desde_ms"], tz)] for c in d["cobertura"]],
+         [[c["instancia"], c["realm"], vis.conta(c) if c["conta_id"] else "—", CLASSE[c["classe"]], c["status"],
+           vis.texto(c["detalhe"]), c["acao"], _naive(c["desde_ms"], tz)] for c in d["cobertura"]],
          {5: 60, 6: 50}, aviso=aviso, fmt_data=(7,))
     conta_l = [["Sessão ativa", x["capturado_em"].astimezone(tz).replace(tzinfo=None), x["instancia"], x["realm"],
-                msk(x["username"]), x["dados"].get("ipAddress"), ""] for x in d["extras"] if x["tipo"] == "sessao"]
+                vis.conta(x), vis.ip_valor(x["dados"].get("ipAddress")), ""]
+               for x in d["extras"] if x["tipo"] == "sessao"]
     conta_l += [["Alteração administrativa", _naive(x["dados"].get("time"), tz), x["instancia"], x["realm"],
-                 msk(x["username"]), x["dados"].get("operationType"), x["dados"].get("resourcePath")]
+                 vis.conta(x), x["dados"].get("operationType"), vis.texto(x["dados"].get("resourcePath"))]
                 for x in d["extras"] if x["tipo"] == "admin"]
     _aba(wb, "Conta", ["Tipo", "Data e hora", "Instância", "Realm", "Conta", "IP / Operação", "Recurso"], conta_l,
          {6: 50}, fmt_data=(1,))
@@ -204,9 +219,10 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
                                             "Código do erro", "Método", "Endereço de retorno", "ID do evento"], det),
         f"consolidado_{inv_id}.csv": csv_bytes(["Janela", "Instância", "Realm", "Aplicação", "Categoria", "Evento",
                                                 "Código", "Quantidade", "IPs distintos"], jan),
-        f"dashboard_{inv_id}.html": dashboard.gerar(d, msk).encode(),
+        f"dashboard_{inv_id}.html": dashboard.gerar(d, vis).encode(),
     }
     ev_bytes = linhas_eventos([{**b["bruto"], "_instancia": b["inst"], "_realm": b["realm"]} for b in brutos])
+    del brutos[:]   # nada de evento decifrado sobrando na memória além do necessário
     req_bytes = _linhas_requisicoes(reqs)
     if sem_mascara:
         arquivos["eventos.jsonl"] = ev_bytes
@@ -218,7 +234,7 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
     manifesto = {
         "versao_coletor": __version__, "gerado_em": datetime.now(timezone.utc).isoformat(),
         "investigacao": {"id": inv_id, "alvo": inv["alvo_mascarado"], "tipo": inv["tipo"],
-                         "justificativa": inv["justificativa"], "operador": inv["operador"],
+                         "justificativa": vis.texto(justificativa), "operador": inv["operador"],
                          "inicio_ms": inv["inicio_ms"], "fim_ms": inv["fim_ms"], "fuso": inv["fuso"],
                          "granularidade": inv["granularidade"], "status": inv["status"],
                          "parametros": inv["parametros"]},
@@ -226,14 +242,14 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
         "instancias": [{"nome": i["nome"], "url": i["url"], "versao_declarada": i["versao_declarada"],
                         "sondas": i["sondas"]} for i in insts],
         "snapshots": [{**s, "lido_em": s["lido_em"].isoformat()} for s in snaps],
-        "eventos": {"total": len(brutos), "sha256": sha256(ev_bytes),
+        "eventos": {"total": ev_bytes.count(b"\n"), "sha256": sha256(ev_bytes),
                     "formato": "RFC 8785, um por linha, ordenado por (_instancia, _realm, id)"},
         "requisicoes": {"total": len(reqs), "sha256": sha256(req_bytes),
                         "redigido": not sem_mascara,
                         "formato": "um por linha; no pacote mascarado, caminho e parâmetros pessoais redigidos e "
                                    "sha256 do arquivo original"},
         "contas_excluidas": [{"id": c["id"], "instancia": c["instancia"], "realm": c["realm"], "via": c["via"],
-                              "conta": msk(c["username"]) if c["username"] else None, "eventos": c["eventos"],
+                              "conta": vis.conta(c), "eventos": c["eventos"],
                               **({"user_id": c["user_id"]} if sem_mascara else {})} for c in excluidas],
         "cobertura": {"realms": list(fr["realms"]), "tempo": list(fr["tempo"])},
         "arquivos": {n: sha256(b) for n, b in arquivos.items()} | ({} if sem_mascara else
@@ -255,4 +271,5 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
     with conectar() as cx:
         trilha(cx, operador, "exportar_sem_mascara" if sem_mascara else "exportar", inv_id,
                arquivo=zp.name, sha256_manifesto=sha256(corpo))
-    return {"pacote": str(zp), "eventos": len(brutos), "requisicoes": len(reqs), "manifesto_sha256": sha256(corpo)}
+    return {"pacote": str(zp), "eventos": ev_bytes.count(b"\n"), "requisicoes": len(reqs),
+            "manifesto_sha256": sha256(corpo)}

@@ -14,7 +14,7 @@ from datetime import timedelta
 
 from psycopg.types.json import Jsonb
 
-from . import coleta, investigar
+from . import coleta, investigar, redigir
 from .db import conectar, trilha
 
 LEASE_JOB = timedelta(minutes=30)
@@ -39,9 +39,15 @@ def _mudar(cx, inv_id: int, de: tuple[str, ...], para: str, operador: str, acao:
 # ------------------------------------------------------------------ casos de uso
 def enfileirar(inv_id: int, operador: str, contas: list[tuple[str, str, str]] | None = None) -> int:
     """Põe a preparação (descoberta, localização, plano) na fila do worker; a coleta começa sozinha depois."""
+    param = {}
+    if contas:   # userIds informados: cifrados com a DEK (a abertura acabou de recebê-la)
+        import base64
+        from .sigilo import Cofre
+        param["contas_cifradas"] = base64.b64encode(
+            Cofre(inv_id, "abrir").cifrar("job", "contas", inv_id, [list(c) for c in contas])).decode()
     with conectar() as cx:
         j = cx.execute("INSERT INTO job (tipo, investigacao_id, parametros) VALUES ('preparar', %s, %s) "
-                       "ON CONFLICT DO NOTHING RETURNING id", (inv_id, Jsonb({"contas": contas or []}))).fetchone()
+                       "ON CONFLICT DO NOTHING RETURNING id", (inv_id, Jsonb(param))).fetchone()
         trilha(cx, operador, "enfileirar_investigacao", inv_id)
         return j["id"] if j else 0
 
@@ -87,6 +93,9 @@ def fechar(inv_id: int) -> dict | None:
                 return None
             extras_conta(inv_id)
             r = investigar.fechar(inv_id)
+            from .pseudonimos import atribuir
+            from .sigilo import Cofre
+            r["pseudonimos"] = atribuir(cx, Cofre(inv_id, "fechar"))
             cx.execute("UPDATE job SET status='concluido', atualizado=now() WHERE investigacao_id=%s "
                        "AND tipo='fechar' AND status='pendente'", (inv_id,))
             return r
@@ -107,7 +116,13 @@ def pegar_job(cx):
 def executar_job(cx, j: dict):
     try:
         if j["tipo"] == "preparar":
-            investigar.preparar(j["investigacao_id"], [tuple(c) for c in j["parametros"].get("contas", [])])
+            contas = j["parametros"].get("contas", [])
+            if j["parametros"].get("contas_cifradas"):
+                import base64
+                from .sigilo import Cofre
+                contas = Cofre(j["investigacao_id"], "preparar").decifrar(
+                    "job", "contas", j["investigacao_id"], base64.b64decode(j["parametros"]["contas_cifradas"]))
+            investigar.preparar(j["investigacao_id"], [tuple(c) for c in contas])
             iniciar_coleta(j["investigacao_id"], "worker")
         elif j["tipo"] == "fechar":
             fechar(j["investigacao_id"])
@@ -117,7 +132,7 @@ def executar_job(cx, j: dict):
     except Exception as e:  # noqa: BLE001
         novo = "falhou" if j["tentativas"] >= 3 else "pendente"
         cx.execute("UPDATE job SET status=%s, erro=%s, atualizado=now() WHERE id=%s",
-                   (novo, f"{type(e).__name__}: {e}"[:500], j["id"]))
+                   (novo, redigir.erro(f"{type(e).__name__}: {e}")[:500], j["id"]))
 
 
 def worker(threads: int = 4, ocioso_s: float | None = None, parar: threading.Event | None = None,

@@ -79,18 +79,26 @@ def localizar(cli: ClienteKC, inst: dict, realms: list[dict], tipo: str, digitos
             continue
         realm = snap["realm"]
         try:
+            nomes = set(variantes(tipo, digitos))
+
+            def por_atributo(u):   # igualdade local (sonda S4)
+                return any(so_digitos(x) == digitos for x in (u.get("attributes") or {}).get(attr, []))
+
+            def por_username(u):
+                return so_digitos(u["username"]) == digitos and u["username"] in nomes
+            # corpo minimizado (§6.1): da resposta da busca só se guardam as contas aproveitadas, com a posição
             for v in variantes(tipo, digitos):
                 qv = f'"{v}"' if " " in v else v
                 for u in cli.get(f"/admin/realms/{realm}/users",
                                  {"q": f"{attr}:{qv}", "exact": "true", "briefRepresentation": "false",
-                                  "max": "100"}):
-                    vals = (u.get("attributes") or {}).get(attr, [])
-                    if any(so_digitos(x) == digitos for x in vals):  # igualdade local (sonda S4)
+                                  "max": "100"}, guardar=por_atributo):
+                    if por_atributo(u):
                         contas[(realm, u["id"])] = {**u, "realm": realm, "via": "atributo"}
                 if inst["buscar_username"]:
                     for u in cli.get(f"/admin/realms/{realm}/users",
-                                     {"username": v, "exact": "true", "briefRepresentation": "false"}):
-                        if so_digitos(u["username"]) == digitos and u["username"] in variantes(tipo, digitos):
+                                     {"username": v, "exact": "true", "briefRepresentation": "false"},
+                                     guardar=por_username):
+                        if por_username(u):
                             contas.setdefault((realm, u["id"]), {**u, "realm": realm, "via": "username"})
         except ErroKC as e:
             erros.append((realm, str(e)))

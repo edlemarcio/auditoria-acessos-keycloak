@@ -176,6 +176,49 @@ def segredo(inst: dict, finalidade: str) -> str:
     return cripto.decifrar(blob, cripto.ctx_segredo(inst["nome"]))
 
 
+# ------------------------------------------------------------------ histórico de contas do alvo (K_historico)
+# Liga investigações do mesmo alvo para reencontrar contas renomeadas ou excluídas (§5.4). A chave não é a DEK de uma
+# investigação; no modo vault fica no Transit e o chaveiro só a usa para o worker no preparo da investigação daquele
+# alvo. Contexto = HMAC do alvo: um registro não se decifra sob outro alvo.
+def _ctx_hist(alvo_hmac: str, inst_id: int, realm: str) -> str:
+    return f"historico|{alvo_hmac}|{inst_id}|{realm}"
+
+
+def hmac_historico(inv_id: int, alvo_hmac: str, inst_id: int, realm: str, user_id: str) -> str:
+    if modo() == "vault":
+        return pedir("/v1/historico/hmac", investigacao=inv_id, instancia_id=inst_id, realm=realm,
+                     valor=user_id)["hmac"]
+    import hashlib
+    import hmac as _h
+    return _h.new(cripto._chave(b"kc-auditor/historico-hmac/v1"),
+                  f"{_ctx_hist(alvo_hmac, inst_id, realm)}|{user_id}".encode(), hashlib.sha256).hexdigest()
+
+
+def cifrar_historico(inv_id: int, alvo_hmac: str, inst_id: int, realm: str, obj: dict) -> bytes:
+    import json
+    texto = json.dumps(obj, ensure_ascii=False)
+    if modo() == "vault":
+        return pedir("/v1/historico/cifrar", investigacao=inv_id, instancia_id=inst_id, realm=realm,
+                     texto=texto)["cifrado"].encode()
+    nonce = os.urandom(12)
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    return cripto.V3 + nonce + AESGCM(cripto._chave(b"kc-auditor/historico/v1")).encrypt(
+        nonce, texto.encode(), _ctx_hist(alvo_hmac, inst_id, realm).encode())
+
+
+def decifrar_historico(inv_id: int, alvo_hmac: str, inst_id: int, realm: str, blob: bytes) -> dict:
+    import json
+    blob = bytes(blob)
+    if blob.startswith(b"vault:"):
+        if modo() != "vault":
+            raise RuntimeError("histórico cifrado pelo Vault: use AUDITOR_MODO=vault")
+        return json.loads(pedir("/v1/historico/decifrar", investigacao=inv_id, instancia_id=inst_id, realm=realm,
+                                cifrado=blob.decode())["texto"])
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    return json.loads(AESGCM(cripto._chave(b"kc-auditor/historico/v1")).decrypt(
+        blob[1:13], blob[13:], _ctx_hist(alvo_hmac, inst_id, realm).encode()))
+
+
 # ------------------------------------------------------------------ migração das investigações anteriores à W0b
 def migrar_deks(cx) -> int:
     """Modo local: cria as DEKs das investigações antigas e recifra o alvo com a DEK (v2 → v3). Idempotente."""

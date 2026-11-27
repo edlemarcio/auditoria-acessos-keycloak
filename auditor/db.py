@@ -47,6 +47,8 @@ def criar_esquema() -> dict | None:
         from .cripto import migrar_chaves
         feitos = migrar_chaves(cx)
         feitos["deks"] = migrar_deks(cx)
+        from .migrar_cifra import migrar
+        feitos["cifra"] = migrar(cx)
         return feitos
 
 

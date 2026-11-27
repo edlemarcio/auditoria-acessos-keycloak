@@ -4,8 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from psycopg.types.json import Jsonb
-
+from . import sigilo
 from .db import conectar
 from .kc import ClienteKC, ErroKC
 
@@ -49,8 +48,8 @@ def extras_conta(inv_id: int):
     with conectar() as cx:
         cx.execute("DELETE FROM conta_extra WHERE investigacao_id=%s", (inv_id,))
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
-        contas = cx.execute("SELECT * FROM conta WHERE investigacao_id=%s AND incluida AND user_id IS NOT NULL",
-                            (inv_id,)).fetchall()
+        cf = sigilo.Cofre(inv_id, "fechar")
+        contas = [c for c in sigilo.contas(cx, cf, "AND c.incluida") if c.get("user_id")]
         insts = {i["id"]: i for i in cx.execute("SELECT * FROM instancia")}
         clis = {}
         try:
@@ -64,8 +63,10 @@ def extras_conta(inv_id: int):
                          {"resourcePath": f"users/{c['user_id']}*", "dateFrom": d1, "max": "500"})):
                     try:
                         for d in cli.get(caminho, params):
-                            cx.execute("INSERT INTO conta_extra (investigacao_id, conta_id, tipo, dados) "
-                                       "VALUES (%s,%s,%s,%s)", (inv_id, c["id"], tipo, Jsonb(d)))
+                            xid = cx.execute("SELECT nextval('conta_extra_id_seq') AS n").fetchone()["n"]
+                            cx.execute("INSERT INTO conta_extra (id, investigacao_id, conta_id, tipo, cifrado) "
+                                       "VALUES (%s,%s,%s,%s,%s)",
+                                       (xid, inv_id, c["id"], tipo, cf.cifrar("conta_extra", "dados", xid, d)))
                     except ErroKC:
                         pass
         finally:
@@ -73,11 +74,16 @@ def extras_conta(inv_id: int):
                 cli.fechar()
 
 
-def consolidar(inv_id: int, filtros: dict | None = None) -> dict:
-    """Retorna todos os blocos do relatório. filtros: instancia, realm, cliente, categoria (lista)."""
+def consolidar(inv_id: int, filtros: dict | None = None, finalidade: str = "exportar") -> dict:
+    """Retorna todos os blocos do relatório. filtros: instancia, realm, cliente, categoria (lista).
+
+    Os agregados são calculados em SQL sobre os pseudônimos (ps_ip); conta, IP e sessão em claro só existem em
+    memória, decifrados com a DEK. Cada linha traz o valor e o pseudônimo, e a visão (pseudonimos.Visao) decide o que
+    aparece."""
     f = filtros or {}
     with conectar() as cx:
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
+        cf = sigilo.Cofre(inv_id, finalidade)
         tz = ZoneInfo(inv["fuso"])
         insts = {i["id"]: i["nome"] for i in cx.execute("SELECT id, nome FROM instancia")}
         where = ["e.investigacao_id=%(inv)s", "e.time_ms >= %(ini)s", "e.time_ms < %(fim)s",
@@ -94,19 +100,21 @@ def consolidar(inv_id: int, filtros: dict | None = None) -> dict:
         where.append(f"({_case_categoria()}) = ANY(%(cats)s)"); args["cats"] = cats
         W = " AND ".join(where)
         FROM = "FROM evento e JOIN conta c ON c.id=e.conta_id JOIN instancia i ON i.id=e.instancia_id"
+        contas = sigilo.contas(cx, cf)
+        por_id = {c["id"]: c for c in contas}
 
         k = cx.execute(f"""SELECT
               count(*) FILTER (WHERE e.type = ANY(%(logins)s)) AS logins,
               count(*) FILTER (WHERE e.type = ANY(%(falhas)s)) AS falhas,
               count(DISTINCT e.client_id) FILTER (WHERE e.type = ANY(%(logins)s)) AS aplicacoes,
-              count(DISTINCT e.ip) FILTER (WHERE e.type = ANY(%(logins)s) OR e.type = ANY(%(falhas)s)) AS ips,
+              count(DISTINCT e.ps_ip) FILTER (WHERE e.type = ANY(%(logins)s) OR e.type = ANY(%(falhas)s)) AS ips,
               min(e.time_ms) FILTER (WHERE e.type = ANY(%(logins)s)) AS primeiro,
               max(e.time_ms) FILTER (WHERE e.type = ANY(%(logins)s)) AS ultimo,
               count(*) AS eventos
             {FROM} WHERE {W}""", {**args, "logins": list(LOGINS), "falhas": list(FALHAS)}).fetchone()
 
         janelas = cx.execute(f"""SELECT date_trunc(%(gran)s, to_timestamp(e.time_ms/1000.0) AT TIME ZONE %(fuso)s) AS janela,
-              i.nome AS instancia, e.realm, e.client_id, e.type, count(*) AS n, count(DISTINCT e.ip) AS ips
+              i.nome AS instancia, e.realm, e.client_id, e.type, count(*) AS n, count(DISTINCT e.ps_ip) AS ips
             {FROM} WHERE {W} GROUP BY 1,2,3,4,5 ORDER BY 1,2,3,4,5""", args).fetchall()
         por_app = cx.execute(f"""SELECT i.nome AS instancia, e.realm, e.client_id,
               count(*) FILTER (WHERE e.type = ANY(%(logins)s)) AS logins,
@@ -114,48 +122,61 @@ def consolidar(inv_id: int, filtros: dict | None = None) -> dict:
               min(e.time_ms) AS primeiro, max(e.time_ms) AS ultimo
             {FROM} WHERE {W} GROUP BY 1,2,3 ORDER BY 4 DESC""",
                              {**args, "logins": list(LOGINS), "falhas": list(FALHAS)}).fetchall()
-        por_ip = cx.execute(f"""SELECT e.ip, count(*) AS n,
+        por_ip = cx.execute(f"""SELECT e.ps_ip, count(*) AS n,
               count(*) FILTER (WHERE e.type = ANY(%(falhas)s)) AS falhas,
               min(e.time_ms) AS primeiro, max(e.time_ms) AS ultimo,
               string_agg(DISTINCT i.nome || '/' || e.realm, ', ') AS onde
-            {FROM} WHERE {W} GROUP BY 1 ORDER BY 2 DESC""", {**args, "falhas": list(FALHAS)}).fetchall()
+            {FROM} WHERE {W} GROUP BY 1 ORDER BY 2 DESC, 1""", {**args, "falhas": list(FALHAS)}).fetchall()
         heat = cx.execute(f"""SELECT extract(isodow FROM to_timestamp(e.time_ms/1000.0) AT TIME ZONE %(fuso)s)::int AS dow,
               extract(hour FROM to_timestamp(e.time_ms/1000.0) AT TIME ZONE %(fuso)s)::int AS hora, count(*) AS n
             {FROM} WHERE {W} AND e.type = ANY(%(logins)s) GROUP BY 1,2""",
                           {**args, "logins": list(LOGINS)}).fetchall()
-        eventos = cx.execute(f"""SELECT e.time_ms, i.nome AS instancia, e.realm, c.username, c.via, e.type, e.client_id,
-              e.ip, e.session_id, e.error, e.details, e.id, e.user_id
-            {FROM} WHERE {W} ORDER BY e.time_ms""", args).fetchall()
+        eventos = []
+        for r in cx.execute(f"""SELECT e.time_ms, i.nome AS instancia, e.instancia_id, e.realm, e.conta_id, c.via, e.type,
+              e.client_id, e.error, e.id, e.cifrado, e.ps_conta, e.ps_ip, e.ps_sessao,
+              e.user_id, e.session_id, e.ip, e.details, e.bruto
+            {FROM} WHERE {W} ORDER BY e.time_ms, e.id""", args):
+            e = sigilo.abrir_evento(cf, r)
+            c = por_id[e["conta_id"]]
+            e["username"], e["conta_ps"] = c.get("username"), c.get("ps_conta")
+            eventos.append(e)
+        valor_ip = {e["ps_ip"]: e["ip"] for e in eventos if e["ps_ip"]}
+        for r in por_ip:
+            r["ip"] = valor_ip.get(r["ps_ip"])
 
         # ---- destaques
         fora = [e for e in eventos if e["type"] in LOGINS and _fora_expediente(e["time_ms"], tz)]
         rajadas = _rajadas([e for e in eventos if e["type"] in FALHAS])
         base_dias = inv["parametros"].get("base_dias") or 0
         if base_dias:
-            base_ips = {r["ip"] for r in cx.execute(
-                "SELECT DISTINCT ip FROM evento WHERE investigacao_id=%s AND time_ms < %s", (inv_id, inv["inicio_ms"]))}
+            base_ips = {r["ps_ip"] for r in cx.execute(
+                "SELECT DISTINCT ps_ip FROM evento WHERE investigacao_id=%s AND time_ms < %s", (inv_id, inv["inicio_ms"]))}
             vistos, ip_novo = set(), []
             for e in eventos:
-                if e["ip"] and e["ip"] not in base_ips and e["ip"] not in vistos:
-                    vistos.add(e["ip"]); ip_novo.append(e)
+                if e["ps_ip"] and e["ps_ip"] not in base_ips and e["ps_ip"] not in vistos:
+                    vistos.add(e["ps_ip"]); ip_novo.append(e)
         else:
             ip_novo = None
 
-        cob = cx.execute("""SELECT co.*, i.nome AS instancia, c.username, c.via FROM cobertura co
-              JOIN instancia i ON i.id=co.instancia_id LEFT JOIN conta c ON c.id=co.conta_id
+        cob = cx.execute("""SELECT co.*, i.nome AS instancia FROM cobertura co
+              JOIN instancia i ON i.id=co.instancia_id
               WHERE co.investigacao_id=%s ORDER BY i.nome, co.realm""", (inv_id,)).fetchall()
+        for c in cob:
+            conta = por_id.get(c["conta_id"]) or {}
+            c.update(username=conta.get("username"), via=conta.get("via"), ps_conta=conta.get("ps_conta"),
+                     user_id=conta.get("user_id"))
         if f.get("instancia"):
             cob = [c for c in cob if c["instancia"] == f["instancia"]]
         if f.get("realm"):
             cob = [c for c in cob if c["realm"] == f["realm"]]
-        contas = cx.execute("""SELECT c.*, i.nome AS instancia FROM conta c JOIN instancia i ON i.id=c.instancia_id
-              WHERE investigacao_id=%s ORDER BY i.nome, realm""", (inv_id,)).fetchall()
-        try:
-            extras = cx.execute("SELECT x.*, c.realm, c.username, i.nome AS instancia FROM conta_extra x "
-                                "JOIN conta c ON c.id=x.conta_id JOIN instancia i ON i.id=c.instancia_id "
-                                "WHERE x.investigacao_id=%s", (inv_id,)).fetchall()
-        except Exception:  # noqa: BLE001
-            extras = []
+        extras = []
+        for x in cx.execute("SELECT x.*, c.realm, i.nome AS instancia FROM conta_extra x "
+                            "JOIN conta c ON c.id=x.conta_id JOIN instancia i ON i.id=c.instancia_id "
+                            "WHERE x.investigacao_id=%s ORDER BY x.id", (inv_id,)):
+            x = sigilo.abrir_extra(cf, x)
+            conta = por_id.get(x["conta_id"]) or {}
+            x.update(username=conta.get("username"), via=conta.get("via"), ps_conta=conta.get("ps_conta"))
+            extras.append(x)
         tarefas = cx.execute("SELECT status, releitura, count(*) n FROM tarefa WHERE investigacao_id=%s "
                              "GROUP BY 1,2", (inv_id,)).fetchall()
         reqs = cx.execute("SELECT count(*) n, avg(ms) media, percentile_cont(0.95) WITHIN GROUP (ORDER BY ms) p95 "
@@ -165,7 +186,7 @@ def consolidar(inv_id: int, filtros: dict | None = None) -> dict:
     return {"inv": inv, "kpis": k, "janelas": janelas, "por_app": por_app, "por_ip": por_ip, "heat": heat,
             "eventos": eventos, "fora": fora, "rajadas": rajadas, "ip_novo": ip_novo, "cobertura": cob,
             "fracoes": fr, "contas": contas, "extras": extras, "tarefas": tarefas, "requisicoes": reqs,
-            "filtros": {**f, "categorias": cats}, "instancias": insts}
+            "filtros": {**f, "categorias": cats}, "instancias": insts, "cofre": cf}
 
 
 def _fora_expediente(t: int, tz) -> bool:
@@ -191,8 +212,8 @@ def _rajadas(falhas: list[dict], minimo=5, janela_ms=600_000) -> list[dict]:
                     atual["fim"] = evs[j]["time_ms"]; atual["n"] = j - atual["_i"] + 1
                 else:
                     atual = {"instancia": chave[0], "realm": chave[1], "username": chave[2], "inicio": ini,
-                             "fim": evs[j]["time_ms"], "n": j - i + 1, "_i": i,
-                             "ips": sorted({x["ip"] for x in evs[i:j + 1]})}
+                             "fim": evs[j]["time_ms"], "n": j - i + 1, "_i": i, "conta": evs[i],
+                             "ips": sorted({(x["ps_ip"], x["ip"]) for x in evs[i:j + 1]}, key=lambda p: p[0] or "")}
                     out.append(atual)
     for r in out:
         r.pop("_i", None)

@@ -10,8 +10,7 @@ import time
 import zlib
 from datetime import datetime, timedelta, timezone
 
-from psycopg.types.json import Jsonb
-
+from . import redigir, sigilo
 from .db import SNAPSHOTS_DA_INVESTIGACAO, conectar
 from .identificador import variantes
 from .kc import ClienteKC, ErroKC, FalhaTemporaria, SemPermissao
@@ -67,8 +66,12 @@ class Interrompida(Exception):
 
 class Coletor:
     def __init__(self, cx, cli: ClienteKC, inv: dict, conta: dict, tarefa: dict, inst: dict, alvo: tuple | None):
-        self.cx, self.cli, self.inv, self.conta, self.t, self.inst = cx, cli, inv, conta, tarefa, inst
+        self.cx, self.cli, self.inv, self.t, self.inst = cx, cli, inv, tarefa, inst
+        self.cofre = sigilo.Cofre(inv["id"], "coleta")
+        self.conta = sigilo.abrir_conta(self.cofre, conta)
         self.realm = conta["realm"]
+        # corpo minimizado (§6.1): inteiro nas contas do alvo; na varredura, só as linhas aproveitadas
+        self._guardar = self._aceitar if conta["via"] == "varredura" else "inteiro"
         self.sem_dateto = (inst["sondas"] or {}).get("sem_dateTo", False)
         self.alvo = alvo            # (tipo, digitos) para filtrar a varredura de falhas sem userId
         self.limite_atingido = False
@@ -91,18 +94,28 @@ class Coletor:
             return (e.get("details") or {}).get("username") in nomes
         return True
 
+    def _eventos(self, params: list[tuple[str, str]]) -> list[dict]:
+        evs = self.cli.eventos(self.realm, params, self._guardar)
+        for e in evs:
+            e["id_g"] = sigilo.id_gravado(self.cofre, e["id"])
+        return evs
+
     def gravar(self, evs: list[dict]) -> int:
+        """Grava cifrado (DEK da investigação): em claro só o técnico e os pseudônimos de conta, IP e sessão."""
         linhas = [e for e in evs if self._aceitar(e)]
         if not linhas:
             return 0
+        cf, inst = self.cofre, self.inst["id"]
         with self.cx.cursor() as cur:
             cur.executemany(
                 "INSERT INTO evento (investigacao_id, instancia_id, realm, id, conta_id, time_ms, type, client_id, "
-                "user_id, session_id, ip, error, details, bruto) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "error, cifrado, ps_conta, ps_ip, ps_sessao) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT DO NOTHING",
-                [(self.inv["id"], self.inst["id"], self.realm, e["id"], self.conta["id"], e["time"], e["type"],
-                  e.get("clientId"), e.get("userId"), e.get("sessionId"), e.get("ipAddress"), e.get("error"),
-                  Jsonb(e.get("details")), Jsonb(e)) for e in linhas])
+                [(self.inv["id"], inst, self.realm, e["id_g"], self.conta["id"], e["time"], e["type"],
+                  e.get("clientId"), e.get("error"),
+                  sigilo.cifrar_evento(cf, inst, self.realm, e["id_g"], {k: v for k, v in e.items() if k != "id_g"}),
+                  cf.ps("conta", e.get("userId")), cf.ps("ip", e.get("ipAddress")), cf.ps("sessao", e.get("sessionId")))
+                 for e in linhas])
         return len(linhas)
 
     def checkpoint(self, **campos):
@@ -121,14 +134,14 @@ class Coletor:
         anterior = None
         for _ in range(5):
             if self.sem_dateto:   # regressão do dateTo: lê a partir de T em ordem crescente e fica só com T
-                evs = [e for e in self.cli.eventos(self.realm, self._base() + [
+                evs = [e for e in self._eventos(self._base() + [
                     ("dateFrom", str(T)), ("direction", "asc"), ("max", str(PONTUAL))]) if e["time"] == T]
             else:
-                evs = self.cli.eventos(self.realm, self._base() + [("dateFrom", str(T)), ("dateTo", str(T)),
+                evs = self._eventos(self._base() + [("dateFrom", str(T)), ("dateTo", str(T)),
                                                                    ("max", str(PONTUAL))])
             if len(evs) >= PONTUAL:
                 self.limite_atingido = True
-            ids = {e["id"] for e in evs}
+            ids = {e["id_g"] for e in evs}
             if ids == anterior:
                 return evs
             anterior = ids
@@ -147,11 +160,11 @@ class Coletor:
                     p.append(("dateTo", str(fim - 1)))
             else:
                 p += [("dateFrom", str(ini)), ("dateTo", str(cursor)), ("direction", "desc")]
-            pag = self.cli.eventos(self.realm, p)
+            pag = self._eventos(p)
             if asc and self.sem_dateto:
                 pag = [e for e in pag if e["time"] < fim]
             if len(pag) < PAGINA:
-                vistos |= {e["id"] for e in pag if self._aceitar(e)}
+                vistos |= {e["id_g"] for e in pag if self._aceitar(e)}
                 if coletar:
                     self.gravar(pag)
                     self.checkpoint(cursor_ms=fim if asc else ini - 1)
@@ -159,7 +172,7 @@ class Coletor:
             T = pag[-1]["time"]
             parte = [e for e in pag if (e["time"] < T if asc else e["time"] > T)]
             mesmo_ms = self._pontual(T)
-            vistos |= {e["id"] for e in parte + mesmo_ms if self._aceitar(e)}
+            vistos |= {e["id_g"] for e in parte + mesmo_ms if self._aceitar(e)}
             if coletar:
                 self.gravar(parte + mesmo_ms)
             cursor = T + 1 if asc else T - 1
@@ -180,9 +193,9 @@ class Coletor:
         first = self.t["offset_n"] if coletar else 0
         vistos: set[str] = set()
         while True:
-            pag = self.cli.eventos(self.realm, self._base() + [("dateFrom", d1), ("dateTo", d2),
+            pag = self._eventos(self._base() + [("dateFrom", d1), ("dateTo", d2),
                                                                ("first", str(first)), ("max", str(PONTUAL))])
-            vistos |= {e["id"] for e in pag if self._aceitar(e)}
+            vistos |= {e["id_g"] for e in pag if self._aceitar(e)}
             if coletar:
                 self.gravar(pag)
             first += len(pag)
@@ -288,12 +301,11 @@ def executar_tarefa(cx, t: dict, clientes: Clientes) -> str:
                       + SNAPSHOTS_DA_INVESTIGACAO + " ORDER BY lido_em DESC LIMIT 1",
                       {"i": inst["id"], "r": conta["realm"], "inv": inv["id"]}).fetchone()
     expiracao = ((snap or {}).get("config") or {}).get("eventsExpiration")
-    alvo = None
-    if inv["parametros"].get("varredura"):
-        from .chaves import alvo as alvo_de
-        alvo = (inv["tipo"], alvo_de(inv, "coleta"))
-    col = Coletor(cx, clientes.de(inst, inv["id"]), inv, conta, t, inst, alvo)
+    from . import chaves
+    col = None
     try:
+        alvo = (inv["tipo"], chaves.alvo(inv, "coleta")) if inv["parametros"].get("varredura") else None
+        col = Coletor(cx, clientes.de(inst, inv["id"]), inv, conta, t, inst, alvo)
         col.rodar()
         rel = col.reler(expiracao) if col.precisa_reler(expiracao) else None
         n_ev = cx.execute("SELECT count(*) AS n FROM evento WHERE investigacao_id=%s AND conta_id=%s "
@@ -307,13 +319,22 @@ def executar_tarefa(cx, t: dict, clientes: Clientes) -> str:
         status = "pendente" if e.estado == "pausada" else "cancelada"
         cx.execute("UPDATE tarefa SET status=%s, tentativas=tentativas-1, lease_ate=NULL WHERE id=%s",
                    (status, t["id"]))
+    except (chaves.Recusado, chaves.ChaveiroIndisponivel):
+        # sem DEK (a investigação saiu de coleta, ou o chaveiro caiu): a fatia volta à fila com o cursor salvo,
+        # sem gastar tentativa
+        status = "pendente"
+        cx.execute("UPDATE tarefa SET status='pendente', tentativas=tentativas-1, lease_ate=NULL WHERE id=%s",
+                   (t["id"],))
+        time.sleep(2)
     except SemPermissao as e:
         status = "sem_permissao"
-        cx.execute("UPDATE tarefa SET status='sem_permissao', erro=%s WHERE id=%s", (str(e), t["id"]))
+        cx.execute("UPDATE tarefa SET status='sem_permissao', erro=%s WHERE id=%s", (redigir.erro(str(e)), t["id"]))
     except Exception as e:  # noqa: BLE001 — erro inesperado não pode deixar a fatia presa em 'executando'
         status = "falhou" if t["tentativas"] >= 3 else "pendente"
         erro = str(e) if isinstance(e, (FalhaTemporaria, ErroKC)) else f"{type(e).__name__}: {e}"
-        cx.execute("UPDATE tarefa SET status=%s, erro=%s WHERE id=%s", (status, erro[:500], t["id"]))
+        cx.execute("UPDATE tarefa SET status=%s, erro=%s, erro_cifrado=%s WHERE id=%s",
+                   (status, redigir.erro(erro)[:500], col.cofre.cifrar("tarefa", "erro", t["id"], erro) if col else None,
+                    t["id"]))
     return status
 
 

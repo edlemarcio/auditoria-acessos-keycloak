@@ -234,6 +234,41 @@ coleta, com trilha e alerta, e as recusas por identidade e finalidade. Verifica 
 certificado de outra AC não passa, que o fluxo completo pelo worker e a exportação por `pacotes` funcionam (com
 contagem id a id), que o processo falha fechado e que o SIEM não traz DEK, segredo nem alvo.
 
+### Cifra na gravação e pseudônimos (W0b, parte 2)
+
+Tudo o que identifica alguém é gravado cifrado com a DEK da investigação: o conteúdo dos eventos, as contas
+(`userId`, username, e-mail), o caminho e os parâmetros originais das requisições, as sessões e alterações
+administrativas, a justificativa, as mensagens de erro e os `userId` informados com `--conta`. Em claro ficam só o
+técnico (tipo, aplicação, realm, horário, erro padronizado) e os **pseudônimos**: HMAC-SHA-256 com uma chave derivada
+da DEK, por investigação. Os agregados (IPs distintos, por IP, IP novo) são calculados sobre os pseudônimos. O id
+sintético do Keycloak ≤ 21, que é o hash do evento inteiro, vira HMAC. O histórico de contas do alvo usa uma chave
+própria (K_historico), que no modo vault só o worker usa, no preparo e só para o alvo da investigação.
+
+O **corpo das respostas** fica cifrado inteiro nas buscas de eventos das contas do alvo. Na varredura e nas buscas
+de usuário, ficam só as linhas aproveitadas, com a posição na página (`requisicao.corpo_tipo`).
+
+**Rótulos.** No fechamento, cada conta, IP e sessão ganha um rótulo sequencial (`Conta 1`, `IP 12`, `Sessão 41`),
+por ordem de aparição. Um rótulo atribuído não muda mais. O pacote mascarado (planilha, CSV, dashboard) mostra só os
+rótulos, com o identificador do alvo mascarado nos textos, e tira dos eventos administrativos a conta serializada
+(`representation`). O pacote sem máscara mostra os valores reais.
+
+**Migração.** No modo local, o `init` cifra as investigações antigas, uma por transação. O critério probatório é
+que `eventos.sha256` e `requisicoes.sha256`, recalculados do cifrado pelo algoritmo v1, sejam iguais aos do claro
+antes da migração. Se não forem, a investigação volta como estava. Depois o `init` roda `VACUUM FULL`. Na base
+local, os pacotes exportados antes da migração têm os mesmos `eventos.sha256` e `requisicoes.sha256` dos exportados
+depois.
+
+**Teste de aceite: varredura de dado pessoal.** Procura em todas as colunas do banco e nos pacotes mascarados
+indicados os CPFs, títulos, e-mails, `userId` e usernames da massa de teste, e qualquer IPv4 ou IPv6. O resultado
+esperado é zero:
+
+```bash
+AUDITOR_DSN=<dono> python tests/varredura_pii.py saida/investigacao_10.zip
+```
+
+Os testes que leem eventos (`contagem_real.py`, `w0.py`) decifram com a DEK. No modo vault, eles usam a identidade
+`pacotes` e só funcionam com a investigação concluída.
+
 ## Acessos da stack de teste
 
 | O quê | Endereço | Usuário | Senha |

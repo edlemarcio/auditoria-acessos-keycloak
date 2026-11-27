@@ -180,6 +180,28 @@ class Chaveiro:
         return {"segredo": base64.b64decode(d["plaintext"]).decode()}
 
 
+    # ---------------------------------------------------------------- histórico (K_historico)
+    def _historico(self, cn: str, inv_id: int) -> str:
+        """Só o worker, no preparo da investigação, e só para o alvo dela. Devolve o HMAC do alvo (contexto)."""
+        if cn != "worker":
+            raise Negado("finalidade_nao_permitida", f"'{cn}' não usa o histórico de contas")
+        with self.pool.connection() as cx:
+            self._autorizar(cx, cn, inv_id, "preparar")
+            return cx.execute("SELECT alvo_hmac FROM investigacao WHERE id=%s", (inv_id,)).fetchone()["alvo_hmac"]
+
+    def historico(self, cn: str, op: str, inv_id: int, inst_id: int, realm: str, **c) -> dict:
+        ctx = _b64(f"historico|{self._historico(cn, inv_id)}|{inst_id}|{realm}".encode())
+        if op == "hmac":
+            d = self._v("transit/hmac/kc-auditor-historico-hmac/sha2-256",
+                        input=_b64(f"historico|{inst_id}|{realm}|{c['valor']}".encode()))
+            return {"hmac": d["hmac"]}
+        if op == "cifrar":
+            return {"cifrado": self._v("transit/encrypt/kc-auditor-historico", plaintext=_b64(c["texto"].encode()),
+                                       context=ctx)["ciphertext"]}
+        d = self._v("transit/decrypt/kc-auditor-historico", ciphertext=c["cifrado"], context=ctx)
+        return {"texto": base64.b64decode(d["plaintext"]).decode()}
+
+
 def _cn(sock) -> str | None:
     cert = sock.getpeercert()
     for rdn in (cert or {}).get("subject", ()):
@@ -230,6 +252,10 @@ def servir(porta: int = 8443, certs: Path = Path("chaves/servicos")):
                     "/v1/hmac/alvo": lambda: ch.hmac_alvo(cn, c["tipo"], c["digitos"]),
                     "/v1/segredo/cifrar": lambda: ch.cifrar_segredo(cn, c["instancia"], c["segredo"]),
                     "/v1/segredo": lambda: ch.segredo(cn, int(c["instancia_id"]), c.get("finalidade", "")),
+                    **{f"/v1/historico/{op}": (lambda op=op: ch.historico(
+                        cn, op, int(c["investigacao"]), int(c["instancia_id"]), c["realm"],
+                        **{k: c[k] for k in ("valor", "texto", "cifrado") if k in c}))
+                       for op in ("hmac", "cifrar", "decifrar")},
                 }
                 if self.path not in rotas:
                     return self._responder(404, {"motivo": "rota inexistente"})

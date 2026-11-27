@@ -115,6 +115,8 @@ def migrar_chaves(cx) -> dict:
                            (cifrar(_decifrar_v1(bytes(i["segredo_cifrado"])), ctx), i["id"]))
                 feitos["instancias"] += 1
         for inv in cx.execute("SELECT id, tipo, alvo_cifrado, alvo_hmac FROM investigacao FOR UPDATE").fetchall():
+            if bytes(inv["alvo_cifrado"])[:1] == b"\x03" or len(bytes(inv["alvo_cifrado"])) == 0:
+                continue   # já com a DEK da investigação (W0b), ou em abertura
             if versao(inv["alvo_cifrado"], ctx_alvo(inv["alvo_hmac"])) == 2:
                 continue
             dig = _decifrar_v1(bytes(inv["alvo_cifrado"]))

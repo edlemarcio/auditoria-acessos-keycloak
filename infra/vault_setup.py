@@ -34,6 +34,7 @@ CHAVES = {
     "kc-auditor-kek": {"type": "aes256-gcm96", "derived": True},
     "kc-auditor-alvo": {"type": "aes256-gcm96"},          # usada só em /hmac
     "kc-auditor-historico": {"type": "aes256-gcm96", "derived": True},
+    "kc-auditor-historico-hmac": {"type": "aes256-gcm96"},   # usada só em /hmac (unicidade do histórico)
     "kc-auditor-segredos": {"type": "aes256-gcm96", "derived": True},
     "kc-auditor-assinatura": {"type": "ed25519"},
 }
@@ -42,7 +43,7 @@ POLITICAS = {
 path "transit/datakey/plaintext/kc-auditor-kek" { capabilities = ["update"] }
 path "transit/decrypt/kc-auditor-kek"           { capabilities = ["update"] }
 path "transit/hmac/kc-auditor-alvo/*"           { capabilities = ["update"] }
-path "transit/hmac/kc-auditor-historico/*"      { capabilities = ["update"] }
+path "transit/hmac/kc-auditor-historico-hmac/*" { capabilities = ["update"] }
 path "transit/encrypt/kc-auditor-historico"     { capabilities = ["update"] }
 path "transit/decrypt/kc-auditor-historico"     { capabilities = ["update"] }
 path "transit/encrypt/kc-auditor-segredos"      { capabilities = ["update"] }

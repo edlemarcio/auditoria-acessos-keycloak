@@ -11,44 +11,41 @@ from .consolidar import ERROS, GLOSSARIO
 STATIC = Path(__file__).parent / "static" / "echarts.min.js"
 
 
-def _mascarar_json(obj, mascara):
-    """Aplica a máscara a todo texto de uma estrutura JSON. Eventos administrativos trazem em `representation` a
-    conta inteira serializada como texto, com o identificador dentro."""
-    if isinstance(obj, dict):
-        return {k: _mascarar_json(v, mascara) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_mascarar_json(v, mascara) for v in obj]
-    return mascara(obj) if isinstance(obj, str) else obj
-
-
-def gerar(d: dict, mascara) -> str:
+def gerar(d: dict, vis) -> str:
+    """`vis` (pseudonimos.Visao) decide o que aparece: pseudônimos no mascarado, valores reais no sem máscara."""
     inv = d["inv"]
     tz = ZoneInfo(inv["fuso"])
 
     def dt(ms):
         return datetime.fromtimestamp(ms / 1000, tz).strftime("%Y-%m-%dT%H:%M:%S") if ms else None
 
-    evs = [{"t": e["time_ms"], "i": e["instancia"], "r": e["realm"], "u": mascara(e["username"]),
-            "y": e["type"], "c": e["client_id"], "ip": e["ip"], "s": e["session_id"], "er": e["error"],
-            "d": {k: mascara(str(v)) for k, v in (e["details"] or {}).items()}, "id": e["id"]}
+    def conta_ev(e):
+        return vis.conta({"username": e.get("username"), "ps_conta": e.get("conta_ps"), "via": e.get("via"),
+                          "user_id": e.get("user_id")})
+
+    evs = [{"t": e["time_ms"], "i": e["instancia"], "r": e["realm"], "u": conta_ev(e),
+            "y": e["type"], "c": e["client_id"], "ip": vis.ip(e["ps_ip"], e["ip"]),
+            "s": vis.sessao(e["ps_sessao"], e["session_id"]), "er": e["error"],
+            "d": {k: vis.texto(str(v)) for k, v in (e["details"] or {}).items()}, "id": e["id"]}
            for e in d["eventos"]]
-    cob = [{"i": c["instancia"], "r": c["realm"], "u": mascara(c["username"]) if c["username"] else None,
-            "cl": c["classe"], "st": c["status"], "de": mascara(c["detalhe"]), "ac": c["acao"],
+    cob = [{"i": c["instancia"], "r": c["realm"], "u": vis.conta(c) if c["conta_id"] else None,
+            "cl": c["classe"], "st": c["status"], "de": vis.texto(c["detalhe"]), "ac": c["acao"],
             "desde": c["desde_ms"], "conta": c["conta_id"] is not None} for c in d["cobertura"]]
-    contas = [{"i": c["instancia"], "r": c["realm"], "u": mascara(c["username"]), "id": c["user_id"],
+    contas = [{"i": c["instancia"], "r": c["realm"], "u": vis.conta(c), "id": vis.user_id(c),
                "via": c["via"], "origem": c["origem"], "hab": c["habilitada"],
                "criado": dt(c["criado_ms"]), "inc": c["incluida"]} for c in d["contas"]]
-    extras = [{"tipo": x["tipo"], "i": x["instancia"], "r": x["realm"], "u": mascara(x["username"]),
-               "em": x["capturado_em"].astimezone(tz).strftime("%d/%m/%Y %H:%M"), "d": _mascarar_json(x["dados"], mascara)}
+    extras = [{"tipo": x["tipo"], "i": x["instancia"], "r": x["realm"], "u": vis.conta(x),
+               "em": x["capturado_em"].astimezone(tz).strftime("%d/%m/%Y %H:%M"), "d": vis.json(x["dados"])}
               for x in d["extras"]]
+    from .sigilo import justificativa
     dados = {
         "alvo": inv["alvo_mascarado"], "inicio": inv["inicio_ms"], "fim": inv["fim_ms"], "fuso": inv["fuso"],
         "gran": inv["granularidade"], "status": inv["status"], "id": inv["id"],
-        "justificativa": inv["justificativa"], "operador": inv["operador"],
+        "justificativa": vis.texto(justificativa(d["cofre"], inv)), "operador": inv["operador"],
         "eventos": evs, "cobertura": cob, "contas": contas, "extras": extras,
         "glossario": {k: list(v) for k, v in GLOSSARIO.items()}, "erros": ERROS,
         "base": bool(inv["parametros"].get("base_dias")),
-        "base_ips": sorted({e["ip"] for e in (d.get("base_eventos") or [])}),
+        "base_ips": sorted({vis.ip(e["ps_ip"], e["ip"]) for e in (d.get("base_eventos") or [])}),
         "gerado": datetime.now(tz).strftime("%d/%m/%Y %H:%M"),
     }
     js = STATIC.read_text()

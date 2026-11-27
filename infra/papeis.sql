@@ -42,7 +42,7 @@ ALTER ROLE kc_chaveiro PASSWORD :senha_chaveiro;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM kc_chaveiro;
 GRANT CONNECT ON DATABASE :"DBNAME" TO kc_chaveiro;
 GRANT USAGE ON SCHEMA public TO kc_chaveiro;
-GRANT SELECT (id, status) ON investigacao TO kc_chaveiro;
+GRANT SELECT (id, status, alvo_hmac) ON investigacao TO kc_chaveiro;
 GRANT SELECT (investigacao_id, tipo, status) ON job TO kc_chaveiro;
 GRANT SELECT (id, nome, segredo_cifrado) ON instancia TO kc_chaveiro;
 GRANT SELECT, INSERT ON chave_investigacao TO kc_chaveiro;

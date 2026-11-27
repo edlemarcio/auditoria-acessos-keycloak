@@ -41,10 +41,12 @@ def cmd_init(a):
         print("modo vault: as chaves das investigações novas ficam no Vault (conversões do modo local não se aplicam)")
     elif feitos is None:
         print("chaves: AUDITOR_CHAVE não definida; conversão para o formato v2 não verificada")
-    elif any(v for k, v in feitos.items() if k != "deks"):
+    elif any(v for k, v in feitos.items() if k not in ("deks", "cifra")):
         print(f"chaves convertidas para o formato v2: {feitos}")
     if feitos and feitos.get("deks"):
         print(f"DEKs criadas para {feitos['deks']} investigação(ões) anteriores à W0b (alvo recifrado)")
+    if feitos and any((feitos.get("cifra") or {}).values()):
+        print(f"cifra na gravação aplicada aos dados antigos (hashes v1 conferidos): {feitos['cifra']}")
 
 
 def cmd_chave(a):

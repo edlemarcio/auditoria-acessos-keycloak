@@ -12,7 +12,7 @@ import httpx
 from psycopg.types.json import Jsonb
 
 from . import __version__
-from . import chaves
+from . import chaves, redigir
 from .db import conectar
 
 
@@ -104,7 +104,9 @@ class ClienteKC:
         self.inst = instancia
         self.investigacao_id = investigacao_id
         self.registrar = registrar
-        self.segredo = chaves.segredo(instancia, finalidade or ("coleta" if investigacao_id else "sondas"))
+        self.finalidade = finalidade or ("coleta" if investigacao_id else "sondas")
+        self.segredo = chaves.segredo(instancia, self.finalidade)
+        self._cofre = None
         verify = instancia.get("ca_path") or True
         self.http = httpx.Client(base_url=instancia["url"].rstrip("/"), timeout=30.0, verify=verify,
                                  trust_env=False)
@@ -139,7 +141,16 @@ class ClienteKC:
             return self._token
 
     # ------------------------------------------------------------ requisição
-    def get(self, caminho: str, params: list[tuple[str, str]] | dict | None = None):
+    @property
+    def cofre(self):
+        if self._cofre is None:
+            from .sigilo import Cofre
+            self._cofre = Cofre(self.investigacao_id, self.finalidade)
+        return self._cofre
+
+    def get(self, caminho: str, params: list[tuple[str, str]] | dict | None = None, guardar=None):
+        """`guardar` (corpo minimizado, §6.1): "inteiro" guarda a resposta inteira cifrada; uma função guarda só as
+        linhas aproveitadas, com a posição na página; None, só o hash e o tamanho."""
         tentativa, renovou = 0, False
         while True:
             tentativa += 1
@@ -157,7 +168,7 @@ class ClienteKC:
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 erro = e
             ms = (time.monotonic() - t0) * 1000
-            self._registrar(caminho, params, status, ini, ms, corpo)
+            self._registrar(caminho, params, status, ini, ms, corpo, guardar if status == 200 else None)
 
             if status == 200:
                 return json.loads(corpo)
@@ -176,18 +187,31 @@ class ClienteKC:
             # 429, 5xx, timeout: espera exponencial com variação aleatória
             time.sleep(min(30.0, 0.5 * 2 ** (tentativa - 1)) * random.uniform(0.5, 1.5))
 
-    def _registrar(self, caminho, params, status, ini, ms, corpo):
+    def _registrar(self, caminho, params, status, ini, ms, corpo, guardar=None):
         if not self.registrar:
             return
         p = params if isinstance(params, dict) else (
             {k: [v for kk, v in params if kk == k] if sum(1 for kk, _ in params if kk == k) > 1 else v
              for k, v in params} if params else None)
+        p_red = redigir.params(p)
         with self._log_lock:
+            rid = self._log_cx.execute("SELECT nextval('requisicao_id_seq') AS n").fetchone()["n"]
+            cif = corpo_c = tipo = None
+            if self.investigacao_id:
+                cf = self.cofre
+                cif = cf.cifrar("requisicao", "cifrado", rid, {"caminho": caminho, "params": p})
+                if guardar == "inteiro":
+                    corpo_c, tipo = cf.cifrar_bytes("requisicao", "corpo", rid, corpo), "inteiro"
+                elif callable(guardar):
+                    linhas = [[i, x] for i, x in enumerate(json.loads(corpo)) if guardar(x)]
+                    corpo_c, tipo = cf.cifrar("requisicao", "corpo", rid, linhas), "linhas"
             self._log_cx.execute(
-                "INSERT INTO requisicao (investigacao_id, instancia_id, metodo, caminho, params, status, inicio, ms,"
-                " sha256, bytes, coletor) VALUES (%s,%s,'GET',%s,%s,%s,%s,%s,%s,%s,%s)",
-                (self.investigacao_id, self.inst["id"], caminho, Jsonb(p) if p else None, status, ini, ms,
-                 hashlib.sha256(corpo).hexdigest() if corpo else None, len(corpo), __version__))
+                "INSERT INTO requisicao (id, investigacao_id, instancia_id, metodo, caminho, params, status, inicio, "
+                "ms, sha256, bytes, coletor, cifrado, corpo_cifrado, corpo_tipo) "
+                "VALUES (%s,%s,%s,'GET',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (rid, self.investigacao_id, self.inst["id"], redigir.caminho(caminho),
+                 Jsonb(p_red) if p_red else None, status, ini, ms,
+                 hashlib.sha256(corpo).hexdigest() if corpo else None, len(corpo), __version__, cif, corpo_c, tipo))
 
     def fechar(self):
         self.http.close()
@@ -198,8 +222,8 @@ class ClienteKC:
     def realms(self):
         return self.get("/admin/realms", {"briefRepresentation": "true"})
 
-    def eventos(self, realm: str, params: list[tuple[str, str]]):
-        evs = self.get(f"/admin/realms/{realm}/events", params)
+    def eventos(self, realm: str, params: list[tuple[str, str]], guardar=None):
+        evs = self.get(f"/admin/realms/{realm}/events", params, guardar)
         # Keycloak <= 21 / RH-SSO 7.x não expõe o id do evento: id sintético pelo conteúdo + nº da ocorrência
         # na resposta (eventos idênticos no mesmo ms são distintos; o modo dia lê o dia numa página só)
         vistos: dict[str, int] = {}

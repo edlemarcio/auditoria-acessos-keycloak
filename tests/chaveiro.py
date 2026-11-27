@@ -167,7 +167,7 @@ def main(dias: int = 10):
         checar({e["f"] for e in entregas} >= {"preparar", "coleta"}, "5 DEKs entregues ao worker por finalidade",
                str({e["f"]: e["n"] for e in entregas}))
         r = subprocess.run([sys.executable, "tests/contagem_real.py", str(inv)], cwd=RAIZ, capture_output=True,
-                           text=True, env=os.environ)
+                           text=True, env={**os.environ, "AUDITOR_IDENTIDADE": "pacotes"})
         checar(r.returncode == 0, "5 contagem id a id", r.stdout.strip().replace("\n", " | ")[-300:])
         saida = RAIZ / "saida" / "teste_chaveiro"
         e = auditor("exportar", "--id", str(inv), "--saida", str(saida), identidade="pacotes", timeout=600)
