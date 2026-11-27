@@ -298,15 +298,28 @@ def executar(m: Mestre):
                                                                                      "corrigida (teste W2)"})
     checar(c == 200, "1 editar o rascunho (PUT, sem reenviar o CPF)", r)
     c, r = j("solicitante2", "PUT", f"/api/investigacoes/{A}", json=corpo)
-    checar(c == 404 and r.get("codigo") == "sem_acesso", "1 só o solicitante edita (outro: 404 sem_acesso)", c)
+    checar(c == 404 and r.get("erro") == "sem_acesso", "1 só o solicitante edita (outro: 404 sem_acesso)", c)
     c, inex = j("solicitante1", "GET", "/api/investigacoes/999999")
-    checar(c == 404 and inex == {"codigo": r.get("codigo"), "texto": r.get("texto")},
+    checar(c == 404 and inex == {"erro": r.get("erro"), "mensagem": r.get("mensagem")},
            "1 inexistente e sem vínculo: a mesma resposta 404")
-    for q in ("0001234-56.2026.6.05.0001", "00012345620266050001", "0001234 56 2026", str(A)):
+    for q in ("0001234-56.2026.6.05.0001", "00012345620266050001", "0001234 56.2026/6 05 0001", str(A)):
         c, l = j("solicitante1", "GET", "/api/investigacoes", params={"q": q})
         if not checar(c == 200 and [i["id"] for i in l["itens"]] == [A], f"1 busca tolerante q={q!r}",
                       f"{l.get('total') if isinstance(l, dict) else l}"):
             break
+    cols = {r["column_name"] for r in banco().execute("SELECT column_name FROM information_schema.columns WHERE "
+                                                      "table_name='investigacao'")}
+    pc = banco().execute("SELECT processo_cifrado, processo_hmac FROM investigacao WHERE id=%s", (A,)).fetchone()
+    checar("processo" not in cols and b"0001234" not in bytes(pc["processo_cifrado"]) and len(pc["processo_hmac"]) == 64
+           and st("solicitante1", A)["processo"] == corpo["processo"] and st("auditor1", A).get("processo") is None,
+           "1 processo cifrado com a DEK (busca pelo HMAC); só quem lê vê o processo")
+    checar(j("auditor1", "GET", "/api/investigacoes", params={"q": corpo["processo"]})[1]["total"] == 0,
+           "1 auditor interno não busca pelo processo")
+    c, d = j("solicitante1", "GET", "/api/instancias/disponiveis")
+    checar(c == 200 and {x["nome"] for x in d} == {"kc26", "rhsso"} and "intranet" in next(
+        x["realms"] for x in d if x["nome"] == "kc26") and all(set(x) == {"nome", "realms"} for x in d) and
+           j("admin1", "GET", "/api/instancias/disponiveis")[0] == 403,
+           "1 instâncias disponíveis para o assistente (sem URL, segredo nem orçamento)", d)
     c, l = j("solicitante1", "GET", "/api/investigacoes", params={"q": "99999999"})
     checar(c == 200 and l["total"] == 0 and set(l) == {"itens", "total", "pagina", "por_pagina"},
            "1 lista paginada {itens, total, pagina, por_pagina}")
@@ -337,7 +350,22 @@ def executar(m: Mestre):
            [x["status"] for x in lt][:3] == ["rascunho", "aguardando_aprovacao", "devolvida"] and
            all("motivo" not in x for x in lta), "1 linha do tempo: motivo para o solicitante, nunca para o auditor",
            [x["status"] for x in lt])
+    c, ap = j("aprovador1", "GET", "/api/aprovacoes")
+    it = next((x for x in ap if x["investigacao"] == A), {}) if c == 200 else {}
+    c2, el = j("aprovador1", "GET", f"/api/investigacoes/{A}/investigadores-elegiveis")
+    checar(c2 == 404, "1 elegíveis: só para o aprovador que decide (devolvida: 404)", c2)
     c, r = j("solicitante1", "POST", f"/api/investigacoes/{A}/reenviar", json={"motivo": "Fundamento incluído"})
+    c, ap = j("aprovador1", "GET", "/api/aprovacoes")
+    it = next((x for x in ap if x["investigacao"] == A), {})
+    checar(it.get("risco_expiracao") is True and it["realm_critico"]["realm"] == "servicos" and it.get("prazo") and
+           it.get("escalonado") is False, "1 aprovações: prazo, escalonado e risco de expiração (realm mais crítico)",
+           it.get("realm_critico"))
+    c, el = j("aprovador1", "GET", f"/api/investigacoes/{A}/investigadores-elegiveis")
+    nomes_el = {x["username"] for x in el} if c == 200 else set()
+    checar(c == 200 and {"investigador1", "investigador2"} <= nomes_el and "aprovador1" not in nomes_el and
+           "solicitante1" not in nomes_el and set(el[0]) == {"username", "nome", "unidade"} and
+           j("solicitante2", "GET", f"/api/investigacoes/{A}/investigadores-elegiveis")[0] == 403,
+           "1 investigadores elegíveis (sem o solicitante e o próprio aprovador)", sorted(nomes_el))
     checar(c == 200, "1 reenviar", r)
     c, r = j("aprovador1", "POST", f"/api/investigacoes/{A}/aprovar", json={"investigador": "investigador1",
                                                                            "motivo": "Pedido fundamentado"})
@@ -402,7 +430,7 @@ def executar(m: Mestre):
         o.aberto.wait(10)
     time.sleep(1)
     quarta = req("investigador1", "GET", f"/api/investigacoes/{A}/acompanhamento/stream")
-    checar(quarta.status_code == 429 and quarta.json().get("codigo") == "limite_conexoes",
+    checar(quarta.status_code == 429 and quarta.json().get("erro") == "limite_conexoes",
            "5 SSE: a 4ª conexão do mesmo usuário recebe 429", quarta.status_code)
     hb.join(30)
     checar(any(e[0] == "heartbeat" for e in hb.eventos), "5 SSE: heartbeat em 15 s", [e[0] for e in hb.eventos])
@@ -432,11 +460,11 @@ def executar(m: Mestre):
            "origem": {"orgao": "Polícia Federal", "documento": "Ofício 77/2026", "fundamento": "Requisição em IPL",
                       "processo": "IPL 9/2026", "destinatario": "Delegado"}}
     c, r = j("investigador2", "POST", "/api/investigacoes", json=ext)
-    checar(c == 422 and r.get("codigo") == "documento", "3 pedido externo sem documento é recusado no envio direto", c)
+    checar(c == 422 and r.get("erro") == "documento", "3 pedido externo sem documento é recusado no envio direto", c)
     c, r = j("investigador2", "POST", "/api/investigacoes", json={**ext, "rascunho": True})
     E = r["investigacao"]
     c, r = j("investigador2", "POST", f"/api/investigacoes/{E}/enviar")
-    checar(c == 422 and r.get("codigo") == "documento", "3 enviar sem o documento de origem: 422", c)
+    checar(c == 422 and r.get("erro") == "documento", "3 enviar sem o documento de origem: 422", c)
     marca = f"OFICIO-SIGILOSO-{os.getpid()}".encode()
     pdf = b"%PDF-1.4\n" + marca + b" CPF " + ALVO.encode() + b"\n%%EOF"
     c, r = j("investigador2", "POST", f"/api/investigacoes/{E}/documento",
@@ -482,8 +510,14 @@ def executar(m: Mestre):
     de3 = (ate - timedelta(days=2)).isoformat()
     pu = {**corpo, "de": de3, "instancias": ["kc26"], "rascunho": False, "processo": None,
           "preservacao_urgente": True, "justificativa": "Preservação: eventos expiram (teste W2)"}
-    c, r = j("solicitante1", "POST", "/api/investigacoes", json=pu)
+    informada = next(c_ for c_ in json.loads((RAIZ / "dados/pessoas.json").read_text())["contas"]
+                     if c_["instancia"] == "kc26" and c_["realm"] == "intranet")
+    c, r = j("solicitante1", "POST", "/api/investigacoes", json={**pu, "contas_informadas": [
+        {"instancia": "kc26", "realm": "intranet", "username": informada["username"]}]})
     P = r["investigacao"]
+    checar(st("solicitante1", P).get("contas_informadas") == 1 and informada["username"].encode() not in bytes(
+        banco().execute("SELECT contas_cifradas FROM investigacao WHERE id=%s", (P,)).fetchone()["contas_cifradas"]),
+           "4 contas informadas no pedido, cifradas com a DEK")
     c, ini = j("aprovador1", "GET", "/api/inicio")
     checar(any(x["investigacao"] == P and x["tipo"] == "preservacao_urgente" for x in ini["aguardando_minha_decisao"]),
            "4 preservação urgente na fila com tipo=preservacao_urgente")
@@ -508,7 +542,7 @@ def executar(m: Mestre):
                                                           {"sem_mascara": False}),
         ("POST", f"/api/investigacoes/{P}/pausar", None), ("POST", f"/api/investigacoes/{P}/iniciar", None))}
     r = req("investigador1", "GET", f"/api/investigacoes/{P}/pacotes")
-    checar(all(x == 409 for x in lac.values()) and r.json().get("codigo") == "lacrada",
+    checar(all(x == 409 for x in lac.values()) and r.json().get("erro") == "lacrada",
            "4 lacrada: rotas de dados e pacote respondem 409 lacrada", lac)
     checar(acoes("investigador1", P) == [] and "prorrogar_preservacao" in acoes("coordenador1", P) and
            "prorrogar_preservacao" not in acoes("aprovador2", P), "4 acoes na lacrada: investigador nada; só a "
@@ -540,6 +574,19 @@ def executar(m: Mestre):
            r)
     checar(req("investigador1", "GET", f"/api/investigacoes/{P}/pacotes").status_code == 200 and
            "gerar_pacote" in acoes("investigador1", P), "4 depois da aprovação, rotas de dados abrem")
+    n_inf = banco().execute("SELECT count(*) n FROM conta WHERE investigacao_id=%s AND via='informada'",
+                            (P,)).fetchone()["n"]
+    checar(n_inf == 1, "4 a conta informada (username) entrou no preparo", n_inf)
+    c, r = j("investigador1", "POST", f"/api/investigacoes/{P}/pacotes", json={"sem_mascara": False})
+    pk = r.get("pacote")
+    pronto = esperar(lambda: any(x["pacote"] == pk and x["status"] == "pronto" for x in
+                                 j("investigador1", "GET", f"/api/investigacoes/{P}/pacotes")[1]), 300, 2)
+    c, lk = j("investigador1", "POST", f"/api/pacotes/{pk}/link")
+    with banco() as cx:
+        cx.execute("UPDATE link_download SET expira_em=now() - interval '1 minute' WHERE pacote_id=%s", (pk,))
+    r = req("investigador1", "GET", lk.get("link", "/x"))
+    checar(bool(pronto) and r.status_code == 410 and r.json().get("erro") == "expirado",
+           "4 link expirado responde 410 expirado", r.status_code)
     # recusada → DEK destruída
     c, r = j("solicitante1", "POST", "/api/investigacoes", json={**pu, "justificativa": "Preservação a recusar"})
     R = r["investigacao"]
@@ -597,8 +644,9 @@ def executar(m: Mestre):
     checar(c == 422, "7 substituto precisa ser aprovador", c)
     c, r = j("aprovador1", "PUT", "/api/substitutos/eu", json={"substituto": "aprovador2"})
     c2, l = j("aprovador2", "GET", "/api/substitutos")
-    checar(c == 200 and any(x["aprovador"] == "aprovador1" and x["substituto"] == "aprovador2" for x in l),
-           "7 aprovador define o substituto", l)
+    checar(c == 200 and any(x["aprovador"] == "aprovador1" and x["substituto"] == "aprovador2" for x in l) and
+           any(x["aprovador"] == "aprovador2" and x["substituto"] is None for x in l),
+           "7 aprovador define o substituto; a lista traz todos os aprovadores", l)
     checar(j("solicitante1", "PUT", "/api/substitutos/eu", json={"substituto": "aprovador2"})[0] == 403,
            "7 só aprovador define substituto")
     c, r = j("solicitante1", "POST", "/api/investigacoes", json={**pu, "preservacao_urgente": False,
@@ -641,8 +689,8 @@ def executar(m: Mestre):
            "8 concessão gera alerta (notificação) ao auditor interno")
     c, r = j("gestor1", "POST", "/api/perfis/w2teste1/papeis", json={"conceder": ["admin_tecnico"],
                                                                      "motivo": "Combinação que não pode"})
-    checar(c == 422 and r.get("codigo") == "combinacao_proibida" and m.papeis("w2teste1") == ["solicitante"],
-           "8 combinação proibida recusada antes de chamar o Keycloak", r.get("codigo"))
+    checar(c == 422 and r.get("erro") == "combinacao_proibida" and m.papeis("w2teste1") == ["solicitante"],
+           "8 combinação proibida recusada antes de chamar o Keycloak", r.get("erro"))
     c, r = j("gestor1", "POST", "/api/perfis/gestor1/papeis", json={"conceder": ["auditor_interno"],
                                                                     "motivo": "Para mim mesmo"})
     checar(c in (403, 422), "8 gestor não altera os próprios perfis", c)
@@ -661,7 +709,8 @@ def executar(m: Mestre):
     time.sleep(8)   # o vigia registra (e alerta) a concessão feita direto no Keycloak
     c, r = j("gestor1", "POST", "/api/recertificacoes", json={"usuarios": list(TESTE_U), "prazo_dias": 30})
     rid = r.get("id")
-    checar(c == 201 and r["itens"] == 2, "8 abrir recertificação", r)
+    checar(c == 201 and len(r["itens"]) == 2 and {x["username"] for x in r["pendentes"]} == set(TESTE_U) and
+           r.get("criada_em") and r.get("prazo") and r.get("concluida_em") is None, "8 abrir recertificação", r)
     c, r = j("gestor1", "POST", f"/api/recertificacoes/{rid}/confirmar", json={"username": "w2teste1",
                                                                                "manter": False})
     checar(c == 200 and m.papeis("w2teste1") == [], "8 recertificação não confirmada (manter=false) revoga", r)
@@ -671,7 +720,7 @@ def executar(m: Mestre):
     with banco() as cx:
         venc = kc_gestao.vencer_recertificacoes(cx)
     lr = j("gestor1", "GET", "/api/recertificacoes")[1]
-    checar(rid in venc and m.papeis("w2teste2") == [] and lr[0]["encerrada_em"] and
+    checar(rid in venc and m.papeis("w2teste2") == [] and lr[0]["concluida_em"] and not lr[0]["pendentes"] and
            all(x["manter"] is False for x in lr[0]["itens"]), "8 recertificação vencida: o não confirmado é revogado",
            m.papeis("w2teste2"))
     # vigia: papel alterado direto no console do Keycloak
@@ -697,7 +746,7 @@ def executar(m: Mestre):
            "9 saúde: filas e workers", s.get("workers", [])[:1])
     c, r = j("admin1", "POST", "/api/instancias/kc26/testar")
     c2, _ = j("admin1", "POST", "/api/instancias/naoexiste/testar")
-    checar(c == 200 and r["ok"] is True and c2 == 404 and j("investigador1", "POST", "/api/instancias/kc26/testar")[0]
+    checar(c == 200 and r["ok"] is True and "ok" in r["texto"] and c2 == 404 and j("investigador1", "POST", "/api/instancias/kc26/testar")[0]
            == 403, "9 testar conexão da instância (sem sondas)", r)
     r = httpx.get(f"{API}/", trust_env=False)
     checar(r.status_code == 503 and "npm run build" in r.text and "unsafe-inline" not in
@@ -728,11 +777,11 @@ def executar(m: Mestre):
     r = tc.get("/api/_teste_erro")
     log = ERROS.read_text() if ERROS.exists() else ""
     cod = (r.json() if r.headers.get("content-type", "").startswith("application/json") else {}).get("correlacao", "?")
-    checar(r.status_code == 500 and r.json()["codigo"] == "interno" and cod in r.json()["texto"] and cod in log and
+    checar(r.status_code == 500 and r.json()["erro"] == "interno" and cod in r.json()["mensagem"] and cod in log and
            ALVO not in log and "10.1.2.3" not in log and ALVO not in r.text, "9 erro 500 com código de correlação, "
            "sem dado pessoal na resposta nem no log", cod)
     r = req("solicitante1", "POST", "/api/investigacoes", json={"cpf": ALVO, "justificativa": 3})
-    checar(r.status_code == 422 and ALVO not in r.text and r.json().get("codigo") == "validacao",
+    checar(r.status_code == 422 and ALVO not in r.text and r.json().get("erro") == "validacao",
            "9 erro de validação não ecoa o CPF", r.text[:80])
 
     # ================================================================ 10. varredura

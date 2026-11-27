@@ -65,7 +65,7 @@ async def cabecalhos(request: Request, chamar):
 
 @app.exception_handler(Negado)
 async def negado(_req, e: Negado):
-    corpo = {"codigo": e.codigo, "texto": str(e)}
+    corpo = {"erro": e.codigo, "mensagem": str(e)}
     if e.codigo == "step_up":
         corpo["login"] = "/auth/entrar?step_up=1"
     return JSONResponse(corpo, status_code=e.status)
@@ -76,7 +76,7 @@ async def invalido(_req, e: RequestValidationError):
     """Sem eco do valor recebido (o corpo pode trazer o CPF): só onde e o quê."""
     campos = [{"campo": ".".join(str(x) for x in err.get("loc", ())[1:]), "erro": err.get("type")}
               for err in e.errors()]
-    return JSONResponse({"codigo": "validacao", "texto": "Requisição inválida: " +
+    return JSONResponse({"erro": "validacao", "mensagem": "Requisição inválida: " +
                          ", ".join(c["campo"] or "corpo" for c in campos), "campos": campos}, status_code=422)
 
 
@@ -93,8 +93,8 @@ async def interno(req: Request, e: Exception):
         f.write(json.dumps({"quando": datetime.now(timezone.utc).isoformat(), "correlacao": cod,
                             "metodo": req.method, "rota": getattr(req.scope.get("route"), "path", None),
                             "erro": erro(f"{type(e).__name__}: {e}")[:500]}, ensure_ascii=False) + "\n")
-    return JSONResponse({"codigo": "interno", "texto": f"Algo deu errado do nosso lado. Informe ao suporte o código "
-                                                       f"{cod}.", "correlacao": cod}, status_code=500)
+    return JSONResponse({"erro": "interno", "mensagem": f"Algo deu errado do nosso lado. Informe ao suporte o código "
+                                                        f"{cod}.", "correlacao": cod}, status_code=500)
 
 
 # ------------------------------------------------------------------ sessão
@@ -260,7 +260,8 @@ class Pedido(BaseModel):
     rascunho: bool = False         # W2: grava sem enviar
     preservacao_urgente: bool = False
     tipo_processo: str | None = None
-    processo: str | None = None
+    processo: str | None = None    # texto livre: cifrado com a DEK; a busca usa o HMAC normalizado
+    contas_informadas: list[dict] | None = None   # [{"instancia", "realm", "username"}]
 
 
 class Estimativa(BaseModel):
@@ -352,14 +353,15 @@ def r_pedir(p: Pedido, a: Ator = Depends(ator)):
     tipo, valor = _identificador(p)
     return casos.pedir(a, tipo, valor, p.de, p.ate, p.justificativa, p.fuso, p.granularidade, p.instancias,
                        p.varredura, p.base_dias, p.origem, p.rascunho, p.preservacao_urgente, p.tipo_processo,
-                       p.processo)
+                       p.processo, p.contas_informadas)
 
 
 @app.put("/api/investigacoes/{inv}")
 def r_editar(inv: int, p: Pedido, a: Ator = Depends(ator)):
     tipo, valor = _identificador(p, obrigatorio=False)
     return casos.atualizar(a, inv, tipo, valor, p.de, p.ate, p.justificativa, p.fuso, p.granularidade, p.instancias,
-                           p.varredura, p.base_dias, p.origem, p.preservacao_urgente, p.tipo_processo, p.processo)
+                           p.varredura, p.base_dias, p.origem, p.preservacao_urgente, p.tipo_processo, p.processo,
+                           p.contas_informadas)
 
 
 @app.post("/api/investigacoes/{inv}/enviar")
@@ -492,8 +494,19 @@ def r_recertificacoes(a: Ator = Depends(ator)):
 
 
 @app.post("/api/recertificacoes", status_code=201)
-def r_abrir_recertificacao(d: Recertificacao, a: Ator = Depends(ator)):
+def r_abrir_recertificacao(d: Recertificacao | None = None, a: Ator = Depends(ator)):
+    d = d or Recertificacao()
     return casos.abrir_recertificacao(a, d.usuarios, d.prazo_dias)
+
+
+@app.get("/api/investigacoes/{inv}/investigadores-elegiveis")
+def r_elegiveis(inv: int, a: Ator = Depends(ator)):
+    return casos.investigadores_elegiveis(a, inv)
+
+
+@app.get("/api/instancias/disponiveis")
+def r_disponiveis(a: Ator = Depends(ator)):
+    return casos.instancias_disponiveis(a)
 
 
 @app.post("/api/recertificacoes/{rid}/confirmar")
@@ -648,7 +661,7 @@ def _dist() -> Path:
 def r_spa(caminho: str = ""):
     """Arquivo de web/dist se existir; senão index.html (rotas da SPA). /api e /auth nunca caem aqui."""
     if caminho.split("/", 1)[0] in ("api", "auth"):
-        return JSONResponse({"codigo": "inexistente", "texto": "Rota inexistente"}, status_code=404)
+        return JSONResponse({"erro": "inexistente", "mensagem": "Rota inexistente"}, status_code=404)
     d = _dist().resolve()
     if not (d / "index.html").is_file():
         return PlainTextResponse("Interface não compilada (npm run build em web/)", status_code=503)

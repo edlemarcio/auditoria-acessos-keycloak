@@ -443,7 +443,7 @@ claim `coordenador` e o usuário `coordenador1`; as origens de retorno já cadas
 
 **O que entrou:**
 - **Início** (`/api/inicio`) por perfil, **lista** paginada com visões, estados e busca tolerante (`q` casa o nº da
-  investigação ou o nº do processo, ignorando pontos, barras, traços e espaços) e **detalhe** com linha do tempo
+  investigação ou o nº do processo inteiro, com qualquer pontuação) e **detalhe** com linha do tempo
   (motivo só para quem pode ler), expiração dos eventos por realm, estimativa, documento e preservação;
 - **assistente**: `POST /api/estimativas` (não grava nada), rascunho (`"rascunho": true`, `PUT`, `enviar`, `DELETE`
   descarta e destrói as DEKs) e `tipo_processo`;
@@ -466,6 +466,10 @@ claim `coordenador` e o usuário `coordenador1`; as origens de retorno já cadas
   realm a cada ciclo e alerta o auditor interno (notificação + SIEM) de qualquer mudança, inclusive feita direto no
   console do Keycloak;
 - **administração**: saúde com filas e batimento dos workers, `POST /api/instancias/{nome}/testar`;
+- **apoio às telas**: `GET /api/aprovacoes` com prazo, escalonamento e risco de expiração (realm mais crítico),
+  `GET .../investigadores-elegiveis` (só o aprovador que decide) e `GET /api/instancias/disponiveis` (nome e realms);
+- o **nº do processo** é texto livre cifrado com a DEK; a busca compara o HMAC do número normalizado. Contas
+  informadas no pedido (`instancia`, `realm`, `username`) ficam cifradas e entram no preparo;
 - **telas**: `web/dist` servido em `/` como SPA (assets com cache longo, CSP do W1); sem a compilação, `/` responde
   503 com "Interface não compilada (npm run build em web/)" (`AUDITOR_WEB_DIST` muda a pasta);
 - **erro inesperado**: 500 com código de correlação (`7F2A-91C0`), que também vai para `logs/api_erros.jsonl`, com
@@ -479,7 +483,8 @@ leases, da âncora diária, dos prazos da preservação, do escalonamento, das r
 [--arquivo oficio.pdf]`, `enviar`, `descartar`, `documento --id N --arquivo`, `baixar-documento`, `acompanhar`,
 `estimar`, `autorizar-preservacao`, `prorrogar-preservacao`, `pedir-acesso`, `substitutos`, `substituto --usuario`,
 `perfis`, `papeis --usuario --conceder a,b --revogar c --motivo`, `recertificacoes`, `recertificar`,
-`confirmar-recertificacao`, `testar --nome`.
+`confirmar-recertificacao`, `testar --nome`, `elegiveis --id N`, `instancias-disponiveis`, `pedir ... --conta
+instancia:realm:username`.
 
 **Teste de aceite do servidor da W2.** Sobe a API na porta 8300 e um worker, e percorre tudo acima pela API como a
 web faria (cookie + `X-Requisicao`), inclusive uma investigação de 180 dias em kc26 e kc18 e os prazos com relógio

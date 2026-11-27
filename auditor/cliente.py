@@ -113,7 +113,9 @@ def c_pedir(a):
              "fuso": a.fuso, "granularidade": a.granularidade, "varredura": a.varredura, "base_dias": a.base_dias,
              "instancias": a.instancias.split(",") if a.instancias else None}
     corpo.update({"rascunho": a.rascunho, "preservacao_urgente": a.preservacao_urgente,
-                  "tipo_processo": a.tipo_processo, "processo": a.processo})
+                  "tipo_processo": a.tipo_processo, "processo": a.processo,
+                  "contas_informadas": [dict(zip(("instancia", "realm", "username"), x.split(":", 2)))
+                                        for x in a.conta or []] or None})
     if a.orgao:
         corpo["origem"] = {"orgao": a.orgao, "documento": a.documento, "processo": a.processo,
                            "fundamento": a.fundamento, "destinatario": a.destinatario}
@@ -204,6 +206,7 @@ def main(argv: list[str] | None = None):
         p.add_argument("--preservacao-urgente", action="store_true")
         p.add_argument("--tipo-processo", help="base legal (§10.1)")
         p.add_argument("--arquivo", help="documento de origem (PDF ou imagem, até 10 MB)")
+        p.add_argument("--conta", action="append", help="conta informada: instancia:realm:username (repetível)")
         p.set_defaults(f=c_pedir)
     p = sp.add_parser("pedidos")
     p.add_argument("--visao", choices=("minhas", "aguardando", "lacunas", "retencao"))
@@ -240,6 +243,10 @@ def main(argv: list[str] | None = None):
     p.set_defaults(f=lambda a: mostrar(api("POST", "/api/estimativas", {
         "de": a.de, "ate": a.ate, "fuso": a.fuso, "varredura": a.varredura, "base_dias": a.base_dias,
         "instancias": a.instancias.split(",") if a.instancias else None})))
+    p = sp.add_parser("elegiveis", help="investigadores que podem ser designados (aprovador que decide)")
+    p.add_argument("--id", type=int, required=True)
+    p.set_defaults(f=lambda a: mostrar(api("GET", f"/api/investigacoes/{a.id}/investigadores-elegiveis")))
+    sp.add_parser("instancias-disponiveis").set_defaults(f=lambda a: mostrar(api("GET", "/api/instancias/disponiveis")))
     sp.add_parser("substitutos").set_defaults(f=lambda a: mostrar(api("GET", "/api/substitutos")))
     p = sp.add_parser("substituto"); p.add_argument("--usuario", required=True)
     p.set_defaults(f=lambda a: mostrar(api("PUT", "/api/substitutos/eu", {"substituto": a.usuario})))

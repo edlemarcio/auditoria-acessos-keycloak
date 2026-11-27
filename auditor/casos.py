@@ -53,7 +53,58 @@ def _lacrada(i: dict):
 
 
 def _busca(processo: str | None) -> str | None:
-    return re.sub(r"[^0-9a-z]", "", processo.lower()) or None if processo else None
+    """HMAC do nº do processo normalizado (só letras e dígitos, minúsculas): a busca não precisa do texto em claro."""
+    n = re.sub(r"[^0-9a-z]", "", processo.lower()) if processo else ""
+    return chaves.hmac_processo(n) if n else None
+
+
+def _gravar_extras(cx, inv_id: int, dek: bytes, tipo_processo, processo, contas, preservacao: bool):
+    """tipo_processo (metadado), processo (texto livre: cifrado com a DEK, mais o HMAC para a busca) e as contas
+    informadas (cifradas com a DEK, usadas no preparo)."""
+    cx.execute("UPDATE investigacao SET tipo_processo=%s, processo_cifrado=%s, processo_hmac=%s, contas_cifradas=%s, "
+               "preservacao_urgente=%s, atualizado_em=now() WHERE id=%s",
+               (tipo_processo, cripto.cifrar_dek(dek, json.dumps(processo, ensure_ascii=False), cripto.aad(
+                   inv_id, "investigacao", "processo", inv_id)) if processo else None, _busca(processo),
+                cripto.cifrar_dek(dek, json.dumps(contas, ensure_ascii=False), cripto.aad(
+                    inv_id, "investigacao", "contas", inv_id)) if contas else None, preservacao, inv_id))
+
+
+def _abrir_extras(cofre, i: dict) -> dict:
+    out = {}
+    if i.get("processo_cifrado"):
+        out["processo"] = json.loads(cripto.decifrar_dek(cofre.dek, bytes(i["processo_cifrado"]), cripto.aad(
+            i["id"], "investigacao", "processo", i["id"])))
+    if i.get("contas_cifradas"):
+        out["contas_informadas"] = json.loads(cripto.decifrar_dek(cofre.dek, bytes(i["contas_cifradas"]), cripto.aad(
+            i["id"], "investigacao", "contas", i["id"])))
+    return out
+
+
+def _contas(contas) -> list[dict] | None:
+    if not contas:
+        return None
+    if len(contas) > 50:
+        raise Negado("validacao", "contas_informadas: no máximo 50", 422)
+    out = []
+    for c in contas:
+        c = {k: str((c or {}).get(k) or "").strip() for k in ("instancia", "realm", "username")}
+        if not all(c.values()) or any(len(v) > 120 for v in c.values()):
+            raise Negado("validacao", "contas_informadas: instancia, realm e username", 422)
+        out.append(c)
+    return out
+
+
+def _enfileirar(inv_id: int, sub: str, token):
+    """Põe a preparação na fila com as contas informadas no pedido (decifradas com a DEK, recifradas no job)."""
+    from .sigilo import Cofre
+    contas = None
+    with conectar() as cx:
+        i = cx.execute("SELECT id, contas_cifradas FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
+    if i["contas_cifradas"]:
+        with chaves.como_usuario(token):
+            contas = [(c["instancia"], c["realm"], "u:" + c["username"])
+                      for c in _abrir_extras(Cofre(inv_id, "consulta"), i)["contas_informadas"]]
+    servicos.enfileirar(inv_id, sub, contas)
 
 
 class _Ctx:
@@ -202,7 +253,8 @@ def inicio(ator: Ator) -> dict:
 def pedir(ator: Ator, tipo: str, valor: str, de: str, ate: str, justificativa: str, fuso: str = "America/Bahia",
           granularidade: str = "dia", instancias: list[str] | None = None, varredura: bool = False,
           base_dias: int = 0, origem: dict | None = None, rascunho: bool = False, preservacao_urgente: bool = False,
-          tipo_processo: str | None = None, processo: str | None = None) -> dict:
+          tipo_processo: str | None = None, processo: str | None = None,
+          contas_informadas: list[dict] | None = None) -> dict:
     """Solicitante pede; investigador registra pedido externo (ofício), com órgão, documento e fundamento. O pedido
     externo exige o documento de origem antes do envio: nasce como rascunho."""
     _permissao_pedido(ator, origem)
@@ -211,6 +263,7 @@ def pedir(ator: Ator, tipo: str, valor: str, de: str, ate: str, justificativa: s
         raise Negado("documento", "Pedido externo exige o documento de origem: grave como rascunho "
                                   "(\"rascunho\": true), anexe o documento e envie", 422)
     processo = _extras(tipo_processo, processo, origem)
+    contas = _contas(contas_informadas)
     try:
         with chaves.como_usuario(ator.token):
             inv = investigar.abrir(ator.sub, justificativa, tipo, valor, de, ate, fuso, granularidade, instancias,
@@ -219,9 +272,11 @@ def pedir(ator: Ator, tipo: str, valor: str, de: str, ate: str, justificativa: s
     except ValueError as e:
         raise Negado("validacao", str(e), 422) from e
     status = "rascunho" if rascunho else "aguardando_aprovacao"
+    from .sigilo import Cofre
+    with chaves.como_usuario(ator.token):
+        dek = Cofre(inv, "consulta").dek
     with conectar() as cx:
-        cx.execute("UPDATE investigacao SET tipo_processo=%s, processo=%s, processo_busca=%s, preservacao_urgente=%s "
-                   "WHERE id=%s", (tipo_processo, processo, _busca(processo), preservacao_urgente, inv))
+        _gravar_extras(cx, inv, dek, tipo_processo, processo, contas, preservacao_urgente)
         cx.execute("INSERT INTO designacao (investigacao_id, funcao, sub, designado_por) VALUES (%s,'solicitante',%s,%s)",
                    (inv, ator.sub, ator.sub))
         if not rascunho:
@@ -269,13 +324,14 @@ def atualizar(ator: Ator, inv_id: int, tipo: str | None, valor: str | None, de: 
               fuso: str = "America/Bahia", granularidade: str = "dia", instancias: list[str] | None = None,
               varredura: bool = False, base_dias: int = 0, origem: dict | None = None,
               preservacao_urgente: bool = False, tipo_processo: str | None = None,
-              processo: str | None = None) -> dict:
+              processo: str | None = None, contas_informadas: list[dict] | None = None) -> dict:
     """Edita o rascunho (ou o pedido devolvido), só o solicitante. O identificador é opcional: sem ele, fica o atual."""
     from .identificador import mascarar, normalizar
     from .sigilo import Cofre
     _permissao_pedido(ator, origem)
     _motivo(justificativa)
     processo = _extras(tipo_processo, processo, origem)
+    contas = _contas(contas_informadas)
     try:
         ini, fim = investigar.periodo(de, ate, fuso)
         dig = normalizar(tipo, valor) if valor else None
@@ -297,12 +353,11 @@ def atualizar(ator: Ator, inv_id: int, tipo: str | None, valor: str | None, de: 
                                                            cripto.aad(inv_id, "investigacao", "justificativa", inv_id)),
                 "origem_cifrada": cripto.cifrar_dek(dek, json.dumps(origem, ensure_ascii=False),
                                                     cripto.aad(inv_id, "investigacao", "origem", inv_id))
-                if origem else None,
-                "tipo_processo": tipo_processo, "processo": processo, "processo_busca": _busca(processo),
-                "preservacao_urgente": preservacao_urgente}
+                if origem else None}
         with cx.transaction():
             cx.execute("UPDATE investigacao SET " + ", ".join(f"{k}=%s" for k in sets) + ", atualizado_em=now() "
                        "WHERE id=%s", (*sets.values(), inv_id))
+            _gravar_extras(cx, inv_id, dek, tipo_processo, processo, contas, preservacao_urgente)
             trilha(cx, ator.sub, "editar_pedido", inv_id, alvo_alterado=bool(dig), justificativa=justificativa,
                    alvo=alvo.get("alvo_mascarado"), porta=ator.porta)
     return {"investigacao": inv_id, "status": gestao.status_publico(i)}
@@ -407,8 +462,17 @@ def _visao(ctx: _Ctx, i: dict) -> dict:
     if ctx.ator.tem("auditor_interno") and not f:
         return {**base, "designados": [dict(r) for r in ctx.cx.execute(
             "SELECT funcao, sub FROM designacao WHERE investigacao_id=%s ORDER BY funcao", (i["id"],))]}
-    return {**base, "alvo_mascarado": i["alvo_mascarado"], "tipo": i["tipo"], "granularidade": i["granularidade"],
-            "processo": i["processo"]}
+    v = {**base, "alvo_mascarado": i["alvo_mascarado"], "tipo": i["tipo"], "granularidade": i["granularidade"],
+         "processo": None}
+    if i.get("processo_cifrado") and (f or ctx.pode_decidir(i)):
+        from .sigilo import Cofre
+        try:
+            with chaves.como_usuario(ctx.ator.token):
+                v["processo"] = _abrir_extras(Cofre(i["id"], "consulta" if f else "decisao"),
+                                              {**i, "contas_cifradas": None}).get("processo")
+        except chaves.Recusado:
+            pass
+    return v
 
 
 def listar(ator: Ator, visao: str | None = None, estados: list[str] | None = None, q: str | None = None,
@@ -421,7 +485,8 @@ def listar(ator: Ator, visao: str | None = None, estados: list[str] | None = Non
     except ValueError as e:
         raise Negado("validacao", "de/ate: AAAA-MM-DD", 422) from e
     pagina, por_pagina = max(1, pagina), min(max(1, por_pagina), 100)
-    qn = _busca(q.strip()) if q and q.strip() else None
+    qid = q.strip() if q and q.strip() else None
+    qn = _busca(qid) if qid else None
     with conectar() as cx:
         ctx = _Ctx(cx, ator)
         out = []
@@ -440,10 +505,9 @@ def listar(ator: Ator, visao: str | None = None, estados: list[str] | None = Non
                 continue
             if estados and st not in estados:
                 continue
-            if qn:   # nº da investigação; processo só para quem vê o processo (não o auditor interno sem vínculo)
-                por_processo = i["processo_busca"] and qn in i["processo_busca"] and (
-                    ctx.f(i) or not ator.tem("auditor_interno") or ctx.pode_decidir(i))
-                if not (qn == str(i["id"]) or por_processo):
+            if qn:   # nº da investigação; processo (HMAC) só para quem lê o processo (não o auditor sem vínculo)
+                por_processo = i["processo_hmac"] and i["processo_hmac"] == qn and (ctx.f(i) or ctx.pode_decidir(i))
+                if not (qid == str(i["id"]) or por_processo):
                     continue
             c = i["criado_em"].astimezone(timezone.utc).date()
             if (d0 and c < d0) or (d1 and c > d1):
@@ -472,10 +536,15 @@ def ver(ator: Ator, inv_id: int) -> dict:
                     v["justificativa"] = justificativa(cofre, i)
                     if i["origem_cifrada"]:
                         v["origem"] = cofre.decifrar("investigacao", "origem", inv_id, i["origem_cifrada"])
+                    x = _abrir_extras(cofre, i)   # as contas informadas não voltam (username é dado pessoal)
+                    v["processo"] = x.get("processo")
+                    v["contas_informadas"] = len(x.get("contas_informadas") or [])
             except chaves.Recusado:
                 cofre = None   # DEK destruída (preservação recusada ou expirada): só metadados
         v["linha_do_tempo"] = gestao.linha_do_tempo(cx, i, cofre)
         nomes = (i["parametros"] or {}).get("instancias")
+        v.update({"instancias": nomes, "varredura": bool((i["parametros"] or {}).get("varredura")),
+                  "base_dias": (i["parametros"] or {}).get("base_dias") or 0})
         v["expiracao"] = gestao.expiracao(cx, i["inicio_ms"], nomes)
         n = cx.execute("SELECT count(*) n FROM tarefa WHERE investigacao_id=%s", (inv_id,)).fetchone()["n"]
         est = gestao.estimar(cx, i["inicio_ms"], i["fim_ms"], nomes, (i["parametros"] or {}).get("varredura", False),
@@ -665,12 +734,48 @@ def aguardando_decisao(ator: Ator, cx=None) -> list[dict]:
             continue
         p = presv.get(r["investigacao_id"])
         prazo = p["destroi_em"] if p else gestao.somar_dias_uteis(r["criado_em"], gestao.PEDIDO_PARADO_DU)
+        critico = None
+        if r["tipo"] in TIPOS_PEDIDO_INV and not p:   # eventos do período que somem antes da decisão
+            i = cx.execute("SELECT inicio_ms, parametros FROM investigacao WHERE id=%s",
+                           (r["investigacao_id"],)).fetchone()
+            exp = [x for x in gestao.expiracao(cx, i["inicio_ms"], (i["parametros"] or {}).get("instancias"))
+                   if x["expira_antes_da_aprovacao"]]
+            critico = min(exp, key=lambda x: x["eventos_desde"]) if exp else None
         out.append({"pedido": r["id"], "tipo": r["tipo"], "investigacao": r["investigacao_id"],
+                    "risco_expiracao": critico is not None, "realm_critico": critico,
                     "desde": gestao.iso(r["criado_em"]), "criado_em": gestao.iso(r["criado_em"]),
                     "prazo": gestao.iso(prazo), "escalonado": bool(r["escalonamento"] or (p and p["escalonada_em"])),
                     "lacrada": bool(p), **({"parametros": r["parametros"]} if r["tipo"] == "pacote_sem_mascara"
                                            else {})})
     return out
+
+
+def investigadores_elegiveis(ator: Ator, inv_id: int) -> list[dict]:
+    """Só para o aprovador que decide: quem pode ser designado sem ferir a segregação (o próprio aprovador nunca; o
+    solicitante só no pedido externo, §4.2). Precisa ter entrado no auditor ao menos uma vez."""
+    ator.exigir("aprovador")
+    with conectar() as cx:
+        i = _inv(cx, inv_id)
+        ctx = _Ctx(cx, ator)
+        if not ctx.pode_decidir(i):
+            raise sem_acesso()
+        return [{"username": r["username"], "nome": r["nome"], "unidade": r["unidade"]} for r in cx.execute(
+            "SELECT * FROM usuario WHERE 'investigador' = ANY(papeis) ORDER BY username")
+            if r["sub"] != ator.sub and (r["sub"] != i["solicitante_sub"] or i["origem_externa"])
+            and not ({"gestor_acesso", "admin_tecnico"} & set(r["papeis"]))]
+
+
+def instancias_disponiveis(ator: Ator) -> list[dict]:
+    """Para o assistente: só nome e realms pesquisáveis (sem URL, segredo nem orçamento)."""
+    ator.exigir("solicitante", "investigador", "aprovador")
+    with conectar() as cx:
+        realms: dict[str, list] = {r["nome"]: [] for r in cx.execute("SELECT nome FROM instancia ORDER BY nome")}
+        for s in cx.execute("SELECT DISTINCT ON (s.instancia_id, s.realm) s.realm, s.visivel, s.status, i.nome FROM "
+                            "realm_snapshot s JOIN instancia i ON i.id=s.instancia_id ORDER BY s.instancia_id, s.realm, "
+                            "s.lido_em DESC"):
+            if s["visivel"] and s["status"] not in ("sem_permissao", "esperado_invisivel"):
+                realms[s["nome"]].append(s["realm"])
+    return [{"nome": k, "realms": v} for k, v in realms.items()]
 
 
 def _designado_como(cx, inv_id, sub, funcao) -> bool:
@@ -704,7 +809,7 @@ def autorizar_preservacao(ator: Ator, inv_id: int, investigador: str, motivo: st
             gestao.notificar(cx, [i["solicitante_sub"], u["sub"]], "preservacao_autorizada",
                              f"Coleta lacrada autorizada na investigação nº {inv_id}: os dados abrem só com a "
                              f"aprovação do pedido completo", inv_id)
-    servicos.enfileirar(inv_id, ator.sub)
+    _enfileirar(inv_id, ator.sub, ator.token)
     return {"investigacao": inv_id, "status": "preservacao_urgente", "escalona_em": gestao.iso(esc),
             "destroi_em": gestao.iso(dest)}
 
@@ -756,7 +861,7 @@ def iniciar_coleta(ator: Ator, inv_id: int) -> dict:
                       (inv_id,)).rowcount != 1:
             raise Negado("estado", "Investigação mudou de estado", 409)
         trilha(cx, ator.sub, "iniciar_coleta_pedida", inv_id, porta=ator.porta)
-    servicos.enfileirar(inv_id, ator.sub)
+    _enfileirar(inv_id, ator.sub, ator.token)
     return {"investigacao": inv_id, "status": "preparando"}
 
 
@@ -875,8 +980,10 @@ def link_download(ator: Ator, pacote_id: int) -> dict:
     if p["sem_mascara"]:
         ator.exigir_recente()
     agora = datetime.now(timezone.utc)
-    if p["status"] != "pronto" or (p["expira_em"] and p["expira_em"] < agora):
-        raise Negado("estado", f"Pacote {p['status'] if p['status'] != 'pronto' else 'expirado'}", 409)
+    if p["status"] == "expirado" or (p["expira_em"] and p["expira_em"] < agora):
+        raise Negado("expirado", "O pacote sem máscara ficou disponível por 24 h e foi apagado. Peça novamente.", 410)
+    if p["status"] != "pronto":
+        raise Negado("estado", f"Pacote {p['status']}", 409)
     tok = secrets.token_urlsafe(32)
     with conectar() as cx:
         cx.execute("INSERT INTO link_download (token_hash, pacote_id, sub, expira_em) VALUES (%s,%s,%s,%s)",
@@ -888,8 +995,10 @@ def baixar(ator: Ator, tok: str) -> tuple[str, bytes]:
     h = hashlib.sha256(tok.encode()).hexdigest()
     with conectar() as cx, cx.transaction():
         l = cx.execute("SELECT * FROM link_download WHERE token_hash=%s FOR UPDATE", (h,)).fetchone()
-        if not l or l["usado_em"] or l["expira_em"] < datetime.now(timezone.utc) or l["sub"] != ator.sub:
-            raise Negado("link", "Link inválido, expirado, já usado ou de outra pessoa", 404)
+        if not l or l["usado_em"] or l["sub"] != ator.sub:
+            raise Negado("link", "Link inválido, já usado ou de outra pessoa", 404)
+        if l["expira_em"] < datetime.now(timezone.utc):
+            raise Negado("expirado", "Este link expirou (válido por 10 min). Gere um novo em Pacotes.", 410)
         p = cx.execute("SELECT * FROM pacote WHERE id=%s", (l["pacote_id"],)).fetchone()
         _lacrada(cx.execute("SELECT lacrada FROM investigacao WHERE id=%s", (p["investigacao_id"],)).fetchone())
         dados = Path(p["arquivo"]).read_bytes()
@@ -960,10 +1069,12 @@ def substitutos(ator: Ator) -> list[dict]:
     ator.exigir("aprovador", "gestor_acesso", "auditor_interno")
     with conectar() as cx:
         nomes = {r["sub"]: r["username"] for r in cx.execute("SELECT sub, username FROM usuario")}
-        return [{"aprovador": nomes.get(r["aprovador_sub"], r["aprovador_sub"]),
-                 "substituto": nomes.get(r["substituto_sub"], r["substituto_sub"]),
-                 "atualizado_em": gestao.iso(r["atualizado_em"])}
-                for r in cx.execute("SELECT * FROM substituto ORDER BY atualizado_em")]
+        subs = {r["aprovador_sub"]: r for r in cx.execute("SELECT * FROM substituto")}
+        aprov = [r["sub"] for r in cx.execute("SELECT sub FROM usuario WHERE 'aprovador' = ANY(papeis) ORDER BY username")]
+        return [{"aprovador": nomes.get(a, a),
+                 "substituto": nomes.get(subs[a]["substituto_sub"], subs[a]["substituto_sub"]) if a in subs else None,
+                 "atualizado_em": gestao.iso(subs[a]["atualizado_em"]) if a in subs else None}
+                for a in aprov + [a for a in subs if a not in aprov]]
 
 
 def definir_substituto(ator: Ator, substituto: str) -> dict:
@@ -1057,11 +1168,16 @@ def recertificacoes(ator: Ator) -> list[dict]:
         for rc in cx.execute("SELECT * FROM recertificacao ORDER BY id DESC").fetchall():
             its = cx.execute("SELECT * FROM recertificacao_item WHERE recertificacao_id=%s ORDER BY username",
                              (rc["id"],)).fetchall()
-            out.append({"id": rc["id"], "aberta_em": gestao.iso(rc["aberta_em"]), "prazo": gestao.iso(rc["prazo"]),
-                        "encerrada_em": gestao.iso(rc["encerrada_em"]),
-                        "itens": [{"username": x["username"], "papeis": x["papeis"], "manter": x["manter"],
-                                   "decidido_em": gestao.iso(x["decidido_em"])} for x in its]})
+            out.append(_recert(rc, its))
     return out
+
+
+def _recert(rc: dict, its: list[dict]) -> dict:
+    return {"id": rc["id"], "criada_em": gestao.iso(rc["aberta_em"]), "prazo": gestao.iso(rc["prazo"]),
+            "concluida_em": gestao.iso(rc["encerrada_em"]),
+            "pendentes": [{"username": x["username"], "papeis": x["papeis"]} for x in its if x["manter"] is None],
+            "itens": [{"username": x["username"], "papeis": x["papeis"], "manter": x["manter"],
+                       "decidido_em": gestao.iso(x["decidido_em"])} for x in its]}
 
 
 def abrir_recertificacao(ator: Ator, usuarios: list[str] | None = None, prazo_dias: int = 30) -> dict:
@@ -1084,7 +1200,10 @@ def abrir_recertificacao(ator: Ator, usuarios: list[str] | None = None, prazo_di
                porta=ator.porta)
         gestao.notificar(cx, gestao.coordenadores(cx), "recertificacao",
                          f"Recertificação nº {rid} aberta: confirme os perfis da equipe")
-    return {"id": rid, "itens": len(us)}
+        rc = cx.execute("SELECT * FROM recertificacao WHERE id=%s", (rid,)).fetchone()
+        its = cx.execute("SELECT * FROM recertificacao_item WHERE recertificacao_id=%s ORDER BY username",
+                         (rid,)).fetchall()
+    return _recert(rc, its)
 
 
 def confirmar_recertificacao(ator: Ator, rid: int, username: str, manter: bool) -> dict:
@@ -1226,7 +1345,8 @@ def testar_instancia(ator: Ator, nome: str) -> dict:
     ms = int((time.monotonic() - t0) * 1000)
     with conectar() as cx:
         trilha(cx, ator.sub, "testar_instancia", None, instancia=nome, ok=ok, ms=ms, porta=ator.porta)
-    return {"instancia": nome, "ok": ok, "ms": ms, "erro": msg}
+    return {"instancia": nome, "ok": ok, "ms": ms, "erro": msg,
+            "texto": f"Conexão com {nome} ok ({ms} ms)" if ok else f"Falha na conexão com {nome}: {msg}"}
 
 
 def ajustar_orcamento(ator: Ator, nome: str, concorrencia: int, req_por_s: float) -> dict:

@@ -10,11 +10,12 @@ exatamente isto. Mudança de contrato: registrar aqui, no mesmo commit, com o mo
 ## Convenções (valem para todas as rotas)
 
 * JSON em `snake_case`, datas em ISO 8601 com fuso (UTC no servidor; a tela converte para o fuso da investigação).
-* Erro: `{"codigo": "...", "texto": "..."}` com o status HTTP (já é assim no W1). Novo: erro 500 devolve
-  `{"codigo": "interno", "texto": "...", "correlacao": "7F2A-91C0"}` e o mesmo código vai para o log, sem dado pessoal.
-* `401 {"codigo": "step_up"}` → a tela manda para `/auth/entrar?step_up=1&volta=<tela atual>` e repete a ação.
+* Erro: `{"erro": "...", "mensagem": "..."}` com o status HTTP (formato do W1, mantido: a CLI e os testes dependem
+  dele). Novo: erro 500 devolve `{"erro": "interno", "mensagem": "...", "correlacao": "7F2A-91C0"}` e o mesmo
+  código vai para o log, sem dado pessoal.
+* `401 {"erro": "step_up"}` → a tela manda para `/auth/entrar?step_up=1&volta=<tela atual>` e repete a ação.
 * `401` sem sessão → `/auth/entrar?volta=<tela atual>`.
-* `403/404` em investigação: **mesma resposta** `404 {"codigo":"sem_acesso"}` para "não existe" e "sem vínculo" (§7.1).
+* `403/404` em investigação: **mesma resposta** `404 {"erro":"sem_acesso"}` para "não existe" e "sem vínculo" (§7.1).
 * POST/PUT/DELETE com cookie exigem o cabeçalho `X-Requisicao: kc-auditor` (W1).
 * **`acoes`**: toda investigação (lista e detalhe) traz `acoes: [str]`, calculado no servidor para o usuário atual,
   com os nomes do §7.2: `enviar, editar, descartar, aprovar, devolver, recusar, cancelar, reenviar, autorizar_preservacao,
@@ -81,7 +82,7 @@ fila, investigador designado; nunca o auditor interno). Obrigatório para pedido
 * Pedido com `preservacao_urgente: true` fica `aguardando_aprovacao` com `tipo=preservacao_urgente` na fila.
 * `POST /api/investigacoes/{id}/autorizar-preservacao` `{"investigador", "motivo"}` (aprovador, step-up) → estado
   `preservacao_urgente`; a coleta roda **lacrada**: nenhuma rota de dados/pacote da investigação responde até a
-  aprovação do pedido completo (`409 {"codigo":"lacrada"}`).
+  aprovação do pedido completo (`409 {"erro":"lacrada"}`).
 * Aprovar o pedido completo: o `aprovar` do W1, aceito também a partir de `preservacao_urgente`.
 * Recusar a partir de `preservacao_urgente` destrói a DEK (registro na trilha com o fundamento).
 * Prazos em dias úteis: escalonamento ao coordenador em 3, destruição em 5 sem decisão;
@@ -130,42 +131,74 @@ mudar). Escalonamento roda no laço de limpeza do worker.
 arquivos de `web/dist/assets/` com cache longo. CSP do W1 mantida (sem `unsafe-inline` em script). Se `web/dist` não
 existir, `/` responde 503 com texto "Interface não compilada (npm run build em web/)".
 
-## Mudanças registradas pela frente B (servidor), com o motivo
+## Decisões e mudanças registradas na implementação (frente B, com a coordenação)
 
-1. **Corpo de erro.** O W1 respondia `{"erro", "mensagem"}`; agora é `{"codigo", "texto"}` como este contrato fixa
-   (a CLI de produção lê os dois). Erro de validação (422): `{"codigo": "validacao", "texto", "campos": [{"campo",
-   "erro"}]}`, **sem eco do valor recebido** (o padrão do FastAPI devolvia o corpo, que pode trazer o CPF).
-2. **Pedido externo direto.** `POST /api/investigacoes` com `origem` e sem `"rascunho": true` responde
-   `422 {"codigo": "documento"}`: o documento só pode ser anexado a uma investigação que já existe, e o §6 o exige
+Cada item diz o que vale a partir de agora e por quê.
+
+1. **Corpo de erro** (decisão da coordenação): fica o do W1, `{"erro", "mensagem"}` (texto corrigido acima). Erro
+   de validação (422): `{"erro": "validacao", "mensagem", "campos": [{"campo", "erro"}]}`, **sem eco do valor
+   recebido** (o padrão do FastAPI devolvia o corpo, que pode trazer o CPF). Link ou pacote expirado:
+   `410 {"erro": "expirado"}` (link usado, de outra pessoa ou inexistente continua 404).
+2. **Estados.** `na_fila` (W1) e `abrindo` aparecem como `preparando`; `coletada` como `fechando`; `parcial` (coleta
+   interrompida com fatias pendentes; o investigador retoma) como `falhou`. O valor cru vem em `status_interno`.
+   Rascunho descartado fica `descartada` e some das listas (404 como inexistente).
+3. **Pedido externo direto.** `POST /api/investigacoes` com `origem` e sem `"rascunho": true` responde
+   `422 {"erro": "documento"}`: o documento só pode ser anexado a uma investigação que já existe, e o §6 o exige
    antes do envio. Fluxo: POST com `rascunho` → `POST .../documento` → `POST .../enviar` (a CLI faz isso com
    `pedir --orgao ... --arquivo oficio.pdf`).
-3. **`processo`.** O POST/PUT aceita `"processo": str` (nº do processo, até 80 caracteres; sem ele vale
-   `origem.processo`). É o que a busca `q` encontra, ignorando pontuação e espaços; não aparece ao auditor interno
-   sem vínculo (para ele, `q` só casa o nº da investigação).
-4. **Campos a mais em `Investigacao`** (lista e detalhe): `status_interno`, `preservacao_urgente`, `tipo_processo`,
-   `minhas_funcoes`. O campo `alvo` do W1 passou a se chamar só `alvo_mascarado`. `de`/`ate` em ISO (UTC);
-   `inicio_ms`/`fim_ms` continuam. Estados de passagem: `abrindo`/`na_fila` → `preparando`, `coletada` → `fechando`,
-   `parcial` (coleta interrompida com fatias pendentes) → `falhou`. Rascunho descartado fica `descartada` e some das
-   listas (404 como inexistente).
-5. **Lista.** `de`/`ate` filtram pela data de criação (AAAA-MM-DD); `por_pagina` (padrão 25, máximo 100).
-6. **Detalhe.** `documento.nome` vem `null` para quem não decifra (auditor interno); `preservacao` traz também
-   `encerrada_em` e `desfecho` (`aprovada | recusada | expirada`). A `linha_do_tempo` substitui a do W1
-   (`{quando, acao}`).
-7. **Coordenação.** Atributo `coordenador=true` no usuário do realm (`infra/realm_auditor.py` cria `coordenador1`,
-   aprovador), exposto no token como claim `coordenador` e em `/api/eu`. A prorrogação exige aprovador + coordenador.
-8. **Escalonamento.** Os pedidos não têm aprovador atribuído (qualquer aprovador elegível decide). Parado há mais de
-   1 dia útil, o pedido é escalonado aos **substitutos cadastrados** (notificação `escalonamento`); há mais de 2, aos
-   coordenadores. `aguardando_minha_decisao[].escalonado` fica `true`. Os itens trazem também `lacrada`.
-9. **Quem vê.** `GET /api/substitutos`: aprovador, gestor de acesso e auditor interno. `GET .../documento`: também o
-   aprovador designado (quem aprovou). `POST .../pedir-acesso` exige ter algum perfil (sem perfil: 403), para que
-   nenhuma rota sirva a quem não tem perfil (aceite do W1).
-10. **Recertificação.** `POST /api/recertificacoes` aceita `{"usuarios": [..]?, "prazo_dias": 30}`; quem confirma é
-    o gestor de acesso (`manter: false` revoga na hora, com step-up). Vencido o prazo, o laço do worker revoga o que
-    não foi confirmado.
-11. **Notificações (`tipo`).** `pedido_recebido, preservacao_urgente, pedido_devolvido, pedido_aprovado,
+4. **Corpo do pedido (POST/PUT)** (decisão da coordenação) aceita também `"processo": str` (nº do processo, até 80
+   caracteres; sem ele vale `origem.processo`) e `"contas_informadas": [{"instancia", "realm", "username"}]` (até
+   50). O `processo` é texto livre: fica **cifrado com a DEK**, e a busca `q` compara o **HMAC do número
+   normalizado** (só letras e dígitos), portanto casa o número inteiro com qualquer pontuação, não um trecho. As
+   contas informadas ficam cifradas com a DEK e entram no preparo (busca exata do username no realm). O detalhe
+   devolve só a quantidade (`contas_informadas: n`), porque o username é dado pessoal.
+5. **PUT do rascunho**: sem `cpf`/`titulo`, mantém o identificador já gravado. Não muda um pedido entre interno e
+   externo (422 `origem`).
+6. **`enviar` × `reenviar`.** `enviar` só existe em `rascunho`; na `devolvida` a ação é `reenviar` (`{"motivo"}` =
+   o que foi corrigido). As `acoes` já vêm assim: rascunho `[enviar, editar, descartar, enviar_documento?]`;
+   devolvida `[editar, cancelar, reenviar, enviar_documento?]`.
+7. **`Investigacao`** (lista e detalhe) traz também `status_interno`, `preservacao_urgente`, `tipo_processo`,
+   `minhas_funcoes`. O `alvo` do W1 passou a ser só `alvo_mascarado`. `de`/`ate` em ISO (UTC); `inicio_ms`/`fim_ms`
+   continuam. `processo` só para quem lê (designados e o aprovador que decide); para os outros, `null`.
+8. **Detalhe** acrescenta `tipo_processo`, `instancias`, `varredura`, `base_dias`, `processo` (só para quem lê) e
+   `contas_informadas` (quantidade). `documento.nome` vem `null` para quem não decifra (auditor interno);
+   `preservacao` traz também `encerrada_em` e `desfecho` (`aprovada | recusada | expirada`). A `linha_do_tempo`
+   substitui a do W1 (`{quando, acao}`).
+9. **Lista.** `de`/`ate` filtram pela data de criação (AAAA-MM-DD); `por_pagina` (padrão 25, máximo 100). O auditor
+   interno sem vínculo só acha pelo nº da investigação.
+10. **`GET /api/aprovacoes`** (decisão da coordenação): cada item traz `pedido, tipo, investigacao, desde,
+    criado_em, prazo, escalonado, lacrada, risco_expiracao: bool, realm_critico: {"instancia", "realm",
+    "eventos_desde", "expira_antes_da_aprovacao"} | null` (o realm cujos eventos mais antigos somem primeiro) e, no
+    pacote sem máscara, `parametros`. Os itens de `aguardando_minha_decisao` do início têm a mesma forma.
+11. **`GET /api/investigacoes/{id}/investigadores-elegiveis`** (nova; só o aprovador que decide, senão 404
+    `sem_acesso`) → `[{"username", "nome", "unidade"}]`: quem tem o perfil investigador e já entrou no auditor,
+    menos o próprio aprovador e o solicitante. **Diferença:** no pedido externo o solicitante (quem registrou) é
+    elegível, porque o §4.2 permite que ele investigue.
+12. **`GET /api/instancias/disponiveis`** (nova; solicitante, investigador, aprovador) → `[{"nome", "realms": [..]}]`
+    com os realms visíveis na última descoberta; sem URL, segredo nem orçamento.
+13. **Coordenação.** Atributo `coordenador=true` no usuário do realm (`infra/realm_auditor.py` cria `coordenador1`,
+    aprovador), exposto no token como claim `coordenador` e em `/api/eu`. A prorrogação exige aprovador + coordenador.
+14. **Escalonamento.** Os pedidos não têm aprovador atribuído (qualquer aprovador elegível decide). Parado há mais de
+    1 dia útil, o pedido é escalonado aos **substitutos cadastrados** (notificação `escalonamento`); há mais de 2, aos
+    coordenadores; `escalonado` fica `true`.
+15. **`GET /api/substitutos`** (aprovador, gestor de acesso, auditor interno) → `[{"aprovador", "substituto" | null,
+    "atualizado_em" | null}]`, um por aprovador. `PUT /api/substitutos/eu` → `{"aprovador", "substituto"}`.
+16. **Recertificação.** `GET /api/recertificacoes` → `[Recertificacao]` e `POST /api/recertificacoes` (corpo
+    opcional `{"usuarios": [..]?, "prazo_dias": 30}`) → `Recertificacao`, com `Recertificacao = {"id", "criada_em",
+    "prazo", "concluida_em" | null, "pendentes": [{"username", "papeis"}], "itens": [{"username", "papeis",
+    "manter" | null, "decidido_em"}]}`. `POST .../{id}/confirmar` `{"username", "manter"}` → `{"id", "username",
+    "manter"}`; quem confirma é o gestor de acesso (`manter: false` revoga na hora, com step-up). Vencido o prazo, o
+    laço do worker revoga o que não foi confirmado.
+17. **`POST /api/instancias/{nome}/testar`** → `{"instancia", "ok", "ms", "erro" | null, "texto"}` (`texto` é a frase
+    para a tela).
+18. **Quem vê.** `GET .../documento`: também o aprovador designado (quem aprovou). `POST .../pedir-acesso` exige
+    ter algum perfil (sem perfil: 403), para que nenhuma rota sirva a quem não tem perfil (aceite do W1).
+19. **Notificações (`tipo`).** `pedido_recebido, preservacao_urgente, pedido_devolvido, pedido_aprovado,
     pedido_recusado, designacao, preservacao_autorizada, preservacao_expira, escalonamento, pacote_sem_mascara,
     decisao_pacote, coleta_concluida, coleta_falhou, papel_alterado, dek_destruida, recertificacao`. O alerta
     `instancia_fora` do início é calculado (última requisição à instância nos últimos 10 min falhou), só para o
     administrador técnico.
-12. **Acompanhamento.** Contagem de tarefas por instância: `limite` conta como `concluida`; `sem_permissao` e
-    `cancelada` como `falhou`. O evento SSE `heartbeat` não tem `id`.
+20. **Acompanhamento.** Tarefas por instância: `limite` conta como `concluida`; `sem_permissao` e `cancelada` como
+    `falhou`. O evento SSE `heartbeat` não tem `id`.
+21. **Ficam para o W3** (decisão da coordenação): contas do histórico como sugestão ao aprovador (§4.4) e o selo de
+    cobertura.
