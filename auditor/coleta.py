@@ -5,12 +5,13 @@ posição dentro do dia em ordem decrescente (modo dia), gravado a cada página.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 import zlib
 from datetime import datetime, timedelta, timezone
 
-from . import redigir, sigilo
+from . import merkle, redigir, sigilo
 from .db import SNAPSHOTS_DA_INVESTIGACAO, conectar
 from .identificador import variantes
 from .kc import ClienteKC, ErroKC, FalhaTemporaria, SemPermissao
@@ -75,6 +76,7 @@ class Coletor:
         self.sem_dateto = (inst["sondas"] or {}).get("sem_dateTo", False)
         self.alvo = alvo            # (tipo, digitos) para filtrar a varredura de falhas sem userId
         self.limite_atingido = False
+        self.divergencias = 0
 
     def _base(self) -> list[tuple[str, str]]:
         p = []
@@ -100,23 +102,57 @@ class Coletor:
             e["id_g"] = sigilo.id_gravado(self.cofre, e["id"])
         return evs
 
+    def _conteudo(self, e: dict) -> tuple[bytes, str]:
+        """Forma canônica do evento como recebido e o HMAC do conteúdo (compara sem servir de oráculo)."""
+        c = merkle.canonico(e)
+        return c, self.cofre.ps("conteudo", c.decode())
+
     def gravar(self, evs: list[dict]) -> int:
-        """Grava cifrado (DEK da investigação): em claro só o técnico e os pseudônimos de conta, IP e sessão."""
+        """Grava cifrado (DEK da investigação): em claro só o técnico, os pseudônimos de conta, IP e sessão, a folha
+        (compromisso com sal) e o HMAC do conteúdo. Evento já gravado com conteúdo diferente vira versão divergente
+        (§6.1 item 4): nada é descartado em silêncio."""
         linhas = [e for e in evs if self._aceitar(e)]
         if not linhas:
             return 0
         cf, inst = self.cofre, self.inst["id"]
+        ja = {r["id"]: r["hash_conteudo"] for r in self.cx.execute(
+            "SELECT id, hash_conteudo FROM evento WHERE investigacao_id=%s AND instancia_id=%s AND realm=%s "
+            "AND id = ANY(%s)", (self.inv["id"], inst, self.realm, [e["id_g"] for e in linhas]))}
+        novos = []
+        for e in linhas:
+            canon, h = self._conteudo(e)
+            if e["id_g"] in ja:
+                if ja[e["id_g"]] and ja[e["id_g"]] != h:
+                    self.guardar_divergente(e, h, "conteudo")
+                continue
+            sal = os.urandom(32)
+            bruto = {k: v for k, v in e.items() if k != "id_g"}
+            novos.append((self.inv["id"], inst, self.realm, e["id_g"], self.conta["id"], e["time"], e["type"],
+                          e.get("clientId"), e.get("error"),
+                          sigilo.cifrar_evento(cf, inst, self.realm, e["id_g"], bruto, sal=sal.hex()),
+                          cf.ps("conta", e.get("userId")), cf.ps("ip", e.get("ipAddress")),
+                          cf.ps("sessao", e.get("sessionId")), merkle.folha(sal, canon), h))
         with self.cx.cursor() as cur:
             cur.executemany(
                 "INSERT INTO evento (investigacao_id, instancia_id, realm, id, conta_id, time_ms, type, client_id, "
-                "error, cifrado, ps_conta, ps_ip, ps_sessao) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                "ON CONFLICT DO NOTHING",
-                [(self.inv["id"], inst, self.realm, e["id_g"], self.conta["id"], e["time"], e["type"],
-                  e.get("clientId"), e.get("error"),
-                  sigilo.cifrar_evento(cf, inst, self.realm, e["id_g"], {k: v for k, v in e.items() if k != "id_g"}),
-                  cf.ps("conta", e.get("userId")), cf.ps("ip", e.get("ipAddress")), cf.ps("sessao", e.get("sessionId")))
-                 for e in linhas])
+                "error, cifrado, ps_conta, ps_ip, ps_sessao, folha, hash_conteudo) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", novos)
         return len(linhas)
+
+    def guardar_divergente(self, e: dict, h: str, tipo: str):
+        did = self.cx.execute("SELECT nextval('evento_divergente_id_seq') AS n").fetchone()["n"]
+        r = self.cx.execute(
+            "INSERT INTO evento_divergente (id, investigacao_id, instancia_id, realm, evento_id, conta_id, tarefa_id, "
+            "time_ms, tipo, hash_conteudo, cifrado) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING "
+            "RETURNING id",
+            (did, self.inv["id"], self.inst["id"], self.realm, e["id_g"], self.conta["id"], self.t["id"], e["time"],
+             tipo, h, self.cofre.cifrar("evento_divergente", "cifrado", did,
+                                        {"bruto": {k: v for k, v in e.items() if k != "id_g"}}))).fetchone()
+        if r:
+            self.divergencias += 1
+            from .db import trilha
+            trilha(self.cx, "coletor", "evento_divergente", self.inv["id"], tarefa=self.t["id"], tipo=tipo,
+                   divergente=did)
 
     def checkpoint(self, **campos):
         sets = ", ".join(f"{k}=%s" for k in campos)
@@ -147,11 +183,11 @@ class Coletor:
             anterior = ids
         return evs
 
-    def rodar_epoch(self, coletar=True) -> set[str]:
+    def rodar_epoch(self, coletar=True) -> dict[str, dict]:
         asc = self.t["modo"] == "epoch_asc"
         ini, fim = self.t["inicio_ms"], self.t["fim_ms"]
         cursor = self.t["cursor_ms"] if (coletar and self.t["cursor_ms"] is not None) else (ini if asc else fim - 1)
-        vistos: set[str] = set()
+        vistos: dict[str, dict] = {}
         while (cursor < fim) if asc else (cursor >= ini):
             p = self._base() + [("max", str(PAGINA)), ("first", "0")]
             if asc:
@@ -164,7 +200,7 @@ class Coletor:
             if asc and self.sem_dateto:
                 pag = [e for e in pag if e["time"] < fim]
             if len(pag) < PAGINA:
-                vistos |= {e["id_g"] for e in pag if self._aceitar(e)}
+                vistos.update({e["id_g"]: e for e in pag if self._aceitar(e)})
                 if coletar:
                     self.gravar(pag)
                     self.checkpoint(cursor_ms=fim if asc else ini - 1)
@@ -172,7 +208,7 @@ class Coletor:
             T = pag[-1]["time"]
             parte = [e for e in pag if (e["time"] < T if asc else e["time"] > T)]
             mesmo_ms = self._pontual(T)
-            vistos |= {e["id_g"] for e in parte + mesmo_ms if self._aceitar(e)}
+            vistos.update({e["id_g"]: e for e in parte + mesmo_ms if self._aceitar(e)})
             if coletar:
                 self.gravar(parte + mesmo_ms)
             cursor = T + 1 if asc else T - 1
@@ -181,7 +217,7 @@ class Coletor:
         return vistos
 
     # ---- modo dia: só yyyy-MM-dd, ordem decrescente, posição dentro do dia
-    def rodar_dia(self, coletar=True) -> set[str]:
+    def rodar_dia(self, coletar=True) -> dict[str, dict]:
         desl = ((self.inst["sondas"] or {}).get("S6_fuso") or {}).get("deslocamento_horas", 0.0)
         # dia do servidor que contém a fatia
         dia = datetime.fromtimestamp((self.t["inicio_ms"] + desl * 3600_000) / 1000, timezone.utc).date()
@@ -191,11 +227,11 @@ class Coletor:
         # posição não é estável entre eventos com o mesmo time. Página cheia continua por posição e a
         # releitura (obrigatória neste modo) aponta divergência, se houver.
         first = self.t["offset_n"] if coletar else 0
-        vistos: set[str] = set()
+        vistos: dict[str, dict] = {}
         while True:
             pag = self._eventos(self._base() + [("dateFrom", d1), ("dateTo", d2),
                                                                ("first", str(first)), ("max", str(PONTUAL))])
-            vistos |= {e["id_g"] for e in pag if self._aceitar(e)}
+            vistos.update({e["id_g"]: e for e in pag if self._aceitar(e)})
             if coletar:
                 self.gravar(pag)
             first += len(pag)
@@ -205,7 +241,8 @@ class Coletor:
                 break
         return vistos
 
-    def rodar(self, coletar=True) -> set[str]:
+    def rodar(self, coletar=True) -> dict[str, dict]:
+        """Lê a fatia; devolve os eventos aceitos por id gravado."""
         return self.rodar_dia(coletar) if self.t["modo"] == "dia" else self.rodar_epoch(coletar)
 
     # ---- releitura de consistência
@@ -217,32 +254,66 @@ class Coletor:
         return zlib.crc32(str(self.t["id"]).encode()) % 10 == 0   # amostra de 10%
 
     def reler(self, expiracao_s: int | None) -> str:
-        def gravados():
+        """Relê a fatia e compara ids **e conteúdo** com o que foi gravado (§6.1 item 4).
+
+        ok | expirado | divergente (conjuntos diferentes) | divergente_conteudo (mesmo id, conteúdo diferente:
+        as duas versões ficam guardadas) | possivel_alteracao (Keycloak <= 21: o id vem do conteúdo, então um evento
+        alterado aparece como par faltando + extra com o mesmo horário e tipo)."""
+        def gravados() -> dict[str, dict]:
             if self.conta["via"] == "realm":   # realm inteiro: inclui eventos gravados sob contas localizadas
-                return {r["id"] for r in self.cx.execute(
-                    "SELECT id FROM evento WHERE investigacao_id=%s AND instancia_id=%s AND realm=%s AND time_ms>=%s "
-                    "AND time_ms<%s", (self.inv["id"], self.inst["id"], self.realm, self.t["inicio_ms"],
-                                       self.t["fim_ms"])).fetchall()}
-            return {r["id"] for r in self.cx.execute(
-                "SELECT id FROM evento WHERE investigacao_id=%s AND conta_id=%s AND time_ms>=%s AND time_ms<%s",
-                (self.inv["id"], self.conta["id"], self.t["inicio_ms"], self.t["fim_ms"])).fetchall()}
+                q, a = ("SELECT id, hash_conteudo, time_ms, type FROM evento WHERE investigacao_id=%s AND "
+                        "instancia_id=%s AND realm=%s AND time_ms>=%s AND time_ms<%s",
+                        (self.inv["id"], self.inst["id"], self.realm, self.t["inicio_ms"], self.t["fim_ms"]))
+            else:
+                q, a = ("SELECT id, hash_conteudo, time_ms, type FROM evento WHERE investigacao_id=%s AND "
+                        "conta_id=%s AND time_ms>=%s AND time_ms<%s",
+                        (self.inv["id"], self.conta["id"], self.t["inicio_ms"], self.t["fim_ms"]))
+            return {r["id"]: r for r in self.cx.execute(q, a)}
         for tentativa in (1, 2):
-            relidos = {i for i in self.rodar(coletar=False)}
+            relidos = self.rodar(coletar=False)
             g = gravados()
-            extras, faltando = relidos - g, g - relidos
+            extras, faltando = relidos.keys() - g.keys(), g.keys() - relidos.keys()
+            difs = [(relidos[i], h) for i in relidos.keys() & g.keys()
+                    if g[i]["hash_conteudo"] and (h := self._conteudo(relidos[i])[1]) != g[i]["hash_conteudo"]]
+            if difs:
+                for e, h in difs:
+                    self.guardar_divergente(e, h, "conteudo")
+                return "divergente_conteudo"
+            if extras and faltando and any(i.startswith("h:") for i in extras):
+                antes = {(g[i]["time_ms"], g[i]["type"]) for i in faltando}
+                pares = [relidos[i] for i in extras if (relidos[i]["time"], relidos[i]["type"]) in antes]
+                if pares:
+                    for e in pares:
+                        self.guardar_divergente(e, self._conteudo(e)[1], "possivel_alteracao")
+                    return "possivel_alteracao"
             if not extras and not faltando:
                 return "ok"
             if not extras and faltando:
                 limite = time.time() * 1000 - (expiracao_s or 0) * 1000
-                tempos = [r["time_ms"] for r in self.cx.execute(
-                    "SELECT time_ms FROM evento WHERE investigacao_id=%s AND id = ANY(%s)",
-                    (self.inv["id"], list(faltando))).fetchall()]
-                if expiracao_s and all(t < limite for t in tempos):
+                if expiracao_s and all(g[i]["time_ms"] < limite for i in faltando):
                     return "expirado"
             if tentativa == 1:   # recoleta uma vez a fatia inteira
                 self.t["cursor_ms"], self.t["offset_n"] = None, 0
                 self.rodar(coletar=True)
         return "divergente"
+
+
+def selar(cx, inv_id: int, t: dict, origem: str = "coleta") -> dict:
+    """Selo da fatia: raiz Merkle das folhas dos eventos da conta no intervalo, ordenadas. Vai para a tabela selo
+    (só inserção) e para a trilha."""
+    folhas = [r["folha"] for r in cx.execute(
+        "SELECT folha FROM evento WHERE investigacao_id=%s AND conta_id=%s AND time_ms>=%s AND time_ms<%s "
+        "ORDER BY folha", (inv_id, t["conta_id"], t["inicio_ms"], t["fim_ms"]))]
+    if any(f is None for f in folhas):
+        raise RuntimeError(f"tarefa {t['id']}: evento sem folha (dados anteriores à W0b não migrados)")
+    r = merkle.raiz(folhas)
+    v = cx.execute("SELECT coalesce(max(versao), 0) + 1 AS v FROM selo WHERE tarefa_id=%s", (t["id"],)).fetchone()["v"]
+    cx.execute("INSERT INTO selo (investigacao_id, tarefa_id, conta_id, inicio_ms, fim_ms, n_eventos, raiz, versao, "
+               "origem) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+               (inv_id, t["id"], t["conta_id"], t["inicio_ms"], t["fim_ms"], len(folhas), r, v, origem))
+    from .db import trilha
+    trilha(cx, "coletor", "selar_fatia", inv_id, tarefa=t["id"], raiz=r, eventos=len(folhas), versao=v, origem=origem)
+    return {"raiz": r, "eventos": len(folhas), "versao": v}
 
 
 # ------------------------------------------------------------------ fila de tarefas
@@ -308,12 +379,16 @@ def executar_tarefa(cx, t: dict, clientes: Clientes) -> str:
         col = Coletor(cx, clientes.de(inst, inv["id"]), inv, conta, t, inst, alvo)
         col.rodar()
         rel = col.reler(expiracao) if col.precisa_reler(expiracao) else None
+        if col.divergencias and rel != "possivel_alteracao":
+            rel = "divergente_conteudo"   # conteúdo diferente também numa recoleta durante a própria coleta
         n_ev = cx.execute("SELECT count(*) AS n FROM evento WHERE investigacao_id=%s AND conta_id=%s "
                           "AND time_ms>=%s AND time_ms<%s",
                           (inv["id"], conta["id"], t["inicio_ms"], t["fim_ms"])).fetchone()["n"]
         status = "limite" if col.limite_atingido else "concluida"
-        cx.execute("UPDATE tarefa SET status=%s, releitura=%s, eventos=%s, erro=NULL, atualizado=now() "
-                   "WHERE id=%s", (status, rel, n_ev, t["id"]))
+        with cx.transaction():   # o selo e o status da fatia entram juntos
+            cx.execute("UPDATE tarefa SET status=%s, releitura=%s, eventos=%s, erro=NULL, atualizado=now() "
+                       "WHERE id=%s", (status, rel, n_ev, t["id"]))
+            selar(cx, inv["id"], t)
     except Interrompida as e:
         # pausa: volta à fila com o cursor salvo no último checkpoint; cancelamento: encerra a fatia
         status = "pendente" if e.estado == "pausada" else "cancelada"

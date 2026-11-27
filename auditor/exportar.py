@@ -14,7 +14,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
-from . import __version__, dashboard, redigir, sigilo
+from . import __version__, custodia, dashboard, redigir, sigilo
 from .consolidar import ERROS, GLOSSARIO, categoria, consolidar, nome_evento
 from .chaves import alvo as alvo_de
 from .db import SNAPSHOTS_DA_INVESTIGACAO, conectar, trilha
@@ -89,6 +89,7 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
     with conectar() as cx:
         atribuir(cx, cf)   # numeração dos pseudônimos (idempotente; normalmente já feita no fechamento)
         rot = rotulos(cx, inv_id)
+        cust = custodia.exigir(cx, cf, inv_id, operador)   # selos conferem, ou não há pacote
     d = consolidar(inv_id)
     vis = Visao(sem_mascara, msk, rot, cf)
     vis.conhecer(d["contas"], d["eventos"])
@@ -221,6 +222,11 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
                                                 "Código", "Quantidade", "IPs distintos"], jan),
         f"dashboard_{inv_id}.html": dashboard.gerar(d, vis).encode(),
     }
+    contas_por_id = {c["id"]: c for c in d["contas"]}
+    arquivos["fatias.json"] = json.dumps(
+        [{**{k: v for k, v in f.items() if k not in ("conta_id", "instancia_id")},
+          "conta": vis.conta(contas_por_id.get(f["conta_id"], {})), "instancia": d["instancias"][f["instancia_id"]]}
+         for f in cust["fatias"]], ensure_ascii=False, indent=1).encode()
     ev_bytes = linhas_eventos([{**b["bruto"], "_instancia": b["inst"], "_realm": b["realm"]} for b in brutos])
     del brutos[:]   # nada de evento decifrado sobrando na memória além do necessário
     req_bytes = _linhas_requisicoes(reqs)
@@ -252,6 +258,12 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
                               "conta": vis.conta(c), "eventos": c["eventos"],
                               **({"user_id": c["user_id"]} if sem_mascara else {})} for c in excluidas],
         "cobertura": {"realms": list(fr["realms"]), "tempo": list(fr["tempo"])},
+        "custodia": {"raiz_merkle": cust["raiz"], "fatias_seladas": len(cust["fatias"]),
+                     "eventos_selados": cust["eventos_selados"], "eventos_sem_selo": cust["eventos_sem_selo"],
+                     "versoes_divergentes": cust["divergencias"],
+                     "formato": "folha = SHA-256(0x00 ‖ sal ‖ RFC 8785(evento como recebido)); nó = SHA-256(0x01 ‖ "
+                                "e ‖ d), ímpar sobe; raiz da fatia sobre as folhas ordenadas; raiz da investigação "
+                                "sobre as raízes de fatia na ordem de fatias.json"},
         "arquivos": {n: sha256(b) for n, b in arquivos.items()} | ({} if sem_mascara else
                                                                     {"eventos.jsonl": sha256(ev_bytes)}),
     }

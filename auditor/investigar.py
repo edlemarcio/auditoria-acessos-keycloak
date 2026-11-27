@@ -176,12 +176,16 @@ def fechar(inv_id: int) -> dict:
                     if n:
                         motivos.append((st, f"{n} dia(s) com {rotulo} (incompleto)", "Acionar a equipe IAM"))
                         classe = "parcial" if classe == "coberto" else classe
-                for rel, rotulo in (("divergente", "divergente na releitura"), ("expirado", "expirado durante a coleta")):
+                for rel, rotulo in (("divergente", "divergente na releitura"), ("expirado", "expirado durante a coleta"),
+                                    ("divergente_conteudo", "conteúdo divergente entre duas leituras"),
+                                    ("possivel_alteracao", "possível alteração na origem (divergente)")):
                     dias = [t for t in ts if t["releitura"] == rel]
                     if dias:
                         ds = ", ".join(sorted({datetime.fromtimestamp(t["inicio_ms"] / 1000, ZoneInfo(inv["fuso"]))
                                                .strftime("%d/%m") for t in dias}))
-                        motivos.append((rel, f"{rotulo}: {ds}", "Recoletar" if rel == "divergente" else None))
+                        acao = {"divergente": "Recoletar", "divergente_conteudo": "Apurar a alteração na origem",
+                                "possivel_alteracao": "Apurar a alteração na origem"}.get(rel)
+                        motivos.append((rel, f"{rotulo}: {ds}", acao))
                         classe = "parcial" if classe == "coberto" else classe
                 if not motivos:
                     motivos.append(("ok", "Coberto", None))

@@ -269,6 +269,37 @@ AUDITOR_DSN=<dono> python tests/varredura_pii.py saida/investigacao_10.zip
 Os testes que leem eventos (`contagem_real.py`, `w0.py`) decifram com a DEK. No modo vault, eles usam a identidade
 `pacotes` e só funcionam com a investigação concluída.
 
+### Compromissos com sal, selos e releitura por conteúdo (W0b, parte 3)
+
+Na ingestão, cada evento ganha um **sal** aleatório de 256 bits, guardado dentro do cifrado, e uma **folha**:
+`SHA-256(0x00 ‖ sal ‖ RFC 8785(evento como recebido))`. No Keycloak ≤ 21, "como recebido" é sem o id sintético. Sem
+o sal, a folha não serve para confirmar um palpite de IP ou CPF. Ao concluir cada fatia, o coletor grava o **selo**:
+a raiz Merkle das folhas da conta no intervalo, com nós `SHA-256(0x01 ‖ e ‖ d)` e o último nó subindo quando o
+número é ímpar. O selo vai para a tabela `selo`, que só aceita inserção, e para a trilha.
+
+**Releitura por conteúdo.** A releitura compara ids e também o HMAC do conteúdo. No Keycloak 26, o mesmo id com
+conteúdo diferente deixa a fatia como `divergente_conteudo`. No Keycloak 18, onde o id vem do conteúdo, um evento
+alterado aparece como um par "faltando" + "extra" com o mesmo horário e tipo, e a fatia fica `possivel_alteracao`.
+Nos dois casos, a versão relida vai cifrada para `evento_divergente`, e o evento oficial e o selo não mudam. O fato
+vai para a trilha, e a cobertura mostra "Apurar a alteração na origem".
+
+**Na exportação**, a folha de cada evento é recalculada do evento decifrado e do sal, e a raiz de cada fatia é
+recalculada das folhas. Os resultados são comparados com os selos. Folha trocada, célula cifrada trocada entre
+linhas ou contagem diferente **bloqueiam o pacote**, com registro na trilha e alerta no SIEM. O pacote passa a levar
+`fatias.json` (todas as fatias seladas, com raiz e contagem, conta por pseudônimo no mascarado) e, no manifesto, o
+bloco `custodia`: a raiz Merkle da investigação, sobre as raízes de fatia, mais os eventos selados e as versões
+divergentes.
+
+O `init` gera folhas e selos para as investigações antigas, com selos marcados `origem='migracao'` e hashes v1
+conferidos. Rode `infra/papeis.sql` de novo depois do `init`, para tirar da aplicação o UPDATE e o DELETE em `selo`.
+
+**Teste de aceite dos selos.** Usa adulteração de verdade: troca o IP de um evento na `EVENT_ENTITY` e relê, depois
+troca a folha e os cifrados no banco do auditor e tenta exportar. As trocas são desfeitas no fim.
+
+```bash
+AUDITOR_DSN=<kc_auditor_app> AUDITOR_DSN_DONO=<dono> KC_DSN_kc26=... KC_DSN_kc18=... python tests/selos.py 1 9 10
+```
+
 ## Acessos da stack de teste
 
 | O quê | Endereço | Usuário | Senha |

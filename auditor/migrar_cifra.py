@@ -10,6 +10,7 @@ entregue continua reproduzível. O histórico de contas do alvo passa para K_his
 from __future__ import annotations
 
 import json
+import os
 
 from psycopg.types.json import Jsonb
 
@@ -17,7 +18,7 @@ from . import chaves, redigir, sigilo
 from .manifesto import linhas_eventos, sha256
 
 TABELAS = ("evento", "conta", "requisicao", "conta_extra", "investigacao", "tarefa", "historico_identidade",
-           "job")
+           "job", "selo")
 
 
 def _hashes(eventos: list[dict], reqs: list[dict]) -> tuple[str, str]:
@@ -102,6 +103,38 @@ def migrar_investigacao(cx, inv: dict) -> dict:
     return {"investigacao": inv_id, "migrada": True, "eventos_sha256": antes[0], "requisicoes_sha256": antes[1]}
 
 
+def migrar_selos(cx, inv: dict) -> int:
+    """Folha (com sal novo) e HMAC de conteúdo nos eventos antigos; selos retroativos das fatias concluídas,
+    marcados origem='migracao' (selados na migração, não na coleta; o relatório declara). Hashes v1 conferidos."""
+    from . import merkle
+    from .coleta import selar
+    inv_id = inv["id"]
+    if not cx.execute("SELECT EXISTS (SELECT 1 FROM evento WHERE investigacao_id=%s AND folha IS NULL) OR EXISTS "
+                      "(SELECT 1 FROM tarefa t WHERE t.investigacao_id=%s AND t.status IN ('concluida','limite') AND "
+                      "NOT EXISTS (SELECT 1 FROM selo s WHERE s.tarefa_id=t.id)) AS x", (inv_id, inv_id)).fetchone()["x"]:
+        return 0
+    with cx.transaction():
+        cf = sigilo.Cofre(inv_id, "migrar")
+        antes = _hashes(_eventos(cx, inv_id, cf), _reqs(cx, inv_id, cf))
+        for e in cx.execute("SELECT * FROM evento WHERE investigacao_id=%s AND folha IS NULL", (inv_id,)).fetchall():
+            d = sigilo.abrir_evento(cf, e)
+            sal, canon = os.urandom(32), merkle.canonico(d["bruto"])
+            cx.execute("UPDATE evento SET cifrado=%s, folha=%s, hash_conteudo=%s WHERE investigacao_id=%s AND "
+                       "instancia_id=%s AND realm=%s AND id=%s",
+                       (sigilo.cifrar_evento(cf, e["instancia_id"], e["realm"], e["id"], d["bruto"], sal=sal.hex()),
+                        merkle.folha(sal, canon), cf.ps("conteudo", canon.decode()), inv_id, e["instancia_id"],
+                        e["realm"], e["id"]))
+        n = 0
+        for t in cx.execute("SELECT * FROM tarefa t WHERE investigacao_id=%s AND status IN ('concluida','limite') "
+                            "AND NOT EXISTS (SELECT 1 FROM selo s WHERE s.tarefa_id=t.id) ORDER BY id",
+                            (inv_id,)).fetchall():
+            selar(cx, inv_id, t, origem="migracao")
+            n += 1
+        if _hashes(_eventos(cx, inv_id, cf), _reqs(cx, inv_id, cf)) != antes:
+            raise RuntimeError(f"investigação {inv_id}: hashes divergem depois das folhas; migração desfeita")
+    return n
+
+
 def migrar_historico(cx) -> int:
     n = 0
     with cx.transaction():
@@ -129,8 +162,10 @@ def migrar(cx) -> dict:
             if (c, p) != (r["caminho"], r["params"]):
                 cx.execute("UPDATE requisicao SET caminho=%s, params=%s WHERE id=%s", (c, Jsonb(p) if p else None,
                                                                                      r["id"]))
+    selos = sum(migrar_selos(cx, inv) for inv in cx.execute(
+        "SELECT * FROM investigacao WHERE status <> 'abrindo' ORDER BY id").fetchall())
     hist = migrar_historico(cx)
-    if feitas or hist:
+    if feitas or hist or selos:
         for t in TABELAS:
             cx.execute(f"VACUUM FULL {t}")
-    return {"investigacoes": len(feitas), "historico": hist}
+    return {"investigacoes": len(feitas), "historico": hist, "selos_retroativos": selos}
