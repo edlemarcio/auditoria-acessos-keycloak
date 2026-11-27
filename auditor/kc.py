@@ -41,7 +41,8 @@ class Orcamento:
 
     def __init__(self, concorrencia: int, req_por_s: float):
         self.sem = threading.BoundedSemaphore(concorrencia)
-        self.intervalo = 1.0 / req_por_s
+        # 1% de folga: a resolução do relógio não deixa 6 envios caberem em 1 s com orçamento de 5
+        self.intervalo = 1.01 / req_por_s
         self.proximo = time.monotonic()
         self.lock = threading.Lock()
 

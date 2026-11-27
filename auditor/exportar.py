@@ -212,7 +212,9 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
         z.writestr("manifesto.sig", sig)
     for n, b in arquivos.items():
         if n.endswith((".xlsx", ".html")):
-            (saida / n).write_bytes(b)
+            # arquivos soltos: o sufixo evita que uma exportação sem máscara sobrescreva a mascarada
+            base, ext = n.rsplit(".", 1)
+            (saida / f"{base}{'_SEM_MASCARA' if sem_mascara else ''}.{ext}").write_bytes(b)
     with conectar() as cx:
         trilha(cx, operador, "exportar_sem_mascara" if sem_mascara else "exportar", inv_id,
                arquivo=zp.name, sha256_manifesto=sha256(corpo))

@@ -1,0 +1,322 @@
+{
+ "inicio": "2026-11-27T01:57:28.467677+00:00",
+ "criterios": {
+  "1_contagem_independente": {
+   "ok": true,
+   "investigacao": 9,
+   "duracao_s": 345,
+   "contas": [
+    {
+     "instancia": "kc26",
+     "realm": "intranet",
+     "via": "atributo",
+     "coletados": 1843,
+     "sql": 1843,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    },
+    {
+     "instancia": "kc26",
+     "realm": "portal-cidadao",
+     "via": "atributo",
+     "coletados": 1520,
+     "sql": 1520,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    },
+    {
+     "instancia": "kc26",
+     "realm": "servicos",
+     "via": "atributo",
+     "coletados": 1880,
+     "sql": 1880,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    },
+    {
+     "instancia": "kc26",
+     "realm": "intranet",
+     "via": "varredura",
+     "coletados": 0,
+     "sql": 0,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    },
+    {
+     "instancia": "kc26",
+     "realm": "portal-cidadao",
+     "via": "varredura",
+     "coletados": 20,
+     "sql": 20,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    },
+    {
+     "instancia": "kc26",
+     "realm": "servicos",
+     "via": "varredura",
+     "coletados": 0,
+     "sql": 0,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    },
+    {
+     "instancia": "rhsso",
+     "realm": "legado",
+     "via": "atributo",
+     "coletados": 2860,
+     "sql": 2860,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    },
+    {
+     "instancia": "rhsso",
+     "realm": "portal-cidadao",
+     "via": "atributo",
+     "coletados": 3434,
+     "sql": 3434,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    },
+    {
+     "instancia": "rhsso",
+     "realm": "portal-cidadao",
+     "via": "varredura",
+     "coletados": 10,
+     "sql": 10,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    }
+   ]
+  },
+  "3_eventos_desligados": {
+   "ok": true,
+   "cobertura": [
+    [
+     "kc26",
+     "intranet",
+     "coberto",
+     "ok"
+    ],
+    [
+     "kc26",
+     "parceiros",
+     "sem_dados",
+     "esperado_invisivel"
+    ],
+    [
+     "kc26",
+     "portal-cidadao",
+     "coberto",
+     "ok"
+    ],
+    [
+     "kc26",
+     "servicos",
+     "parcial",
+     "retencao_insuficiente"
+    ],
+    [
+     "rhsso",
+     "legado",
+     "parcial",
+     "falhas_nao_gravadas"
+    ],
+    [
+     "rhsso",
+     "portal-cidadao",
+     "coberto",
+     "ok"
+    ],
+    [
+     "rhsso",
+     "rh",
+     "coberto",
+     "pesquisado_sem_conta"
+    ]
+   ],
+   "observacao": "rh tem eventos desligados; sem conta do alvo, o realm aparece 'pesquisado, sem conta'"
+  },
+  "4_realm_esperado_invisivel": {
+   "ok": true,
+   "realm": "kc26/parceiros"
+  },
+  "10_orcamento_de_carga": {
+   "ok": true,
+   "investigacao": 16,
+   "max_req_em_1s": {
+    "kc26": 5,
+    "rhsso": 5
+   },
+   "orcamento": 5,
+   "observacao": "Rodada 2 mediu 6 req em 1 s (intervalos de 196-200 ms por resolução do relógio). Corrigido com 1% de folga no intervalo e medido de novo."
+  },
+  "8_manifesto_verificavel": {
+   "ok": true,
+   "verificacao_ok": [
+    "[ok] assinatura do manifesto confere",
+    "[ok] consolidado_9.csv",
+    "[ok] dashboard_9.html",
+    "[--] eventos.jsonl: não incluído neste pacote (hash registrado: 2181b719394e9983…)",
+    "[ok] eventos_9.csv",
+    "[ok] investigacao_9.xlsx",
+    "[ok] requisicoes.jsonl"
+   ],
+   "adulterado_csv": [
+    "[ok] requisicoes.jsonl"
+   ],
+   "adulterado_evento": [
+    "[FALHA] conjunto de eventos não reproduz o hash"
+   ]
+  },
+  "7_planilhas": {
+   "ok": true,
+   "abas": [
+    "Leia-me",
+    "Parâmetros",
+    "Resumo",
+    "Consolidado por janela",
+    "Por aplicação",
+    "Por IP",
+    "Destaques",
+    "Eventos detalhados",
+    "Cobertura",
+    "Conta"
+   ],
+   "tipo_coluna_data": "datetime",
+   "libreoffice": "convert /home/claude/kc-auditor/saida/investigacao_9.xlsx as a Calc document -> /tmp/lo/investigacao_9.csv using filter : Text - txt - csv (StarCalc)"
+  },
+  "9_trilha": {
+   "ok": true,
+   "acoes": [
+    "abrir_investigacao",
+    "exportar",
+    "exportar_sem_mascara",
+    "fechar_investigacao",
+    "preparar_investigacao"
+   ],
+   "update_bloqueado": true
+  },
+  "2_kill9_retomada_kc26-carga": {
+   "ok": true,
+   "investigacao": 10,
+   "eventos_antes_do_kill": 128877,
+   "tarefas_no_kill": {
+    "concluida": 245,
+    "executando": 4,
+    "pendente": 479
+   },
+   "resultado": [
+    {
+     "instancia": "kc26-carga",
+     "realm": "intranet",
+     "via": "realm",
+     "coletados": 390433,
+     "sql": 390433,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    }
+   ],
+   "duracao_total_s": 179
+  },
+  "2_kill9_retomada_rhsso-carga": {
+   "ok": true,
+   "investigacao": 11,
+   "eventos_antes_do_kill": 283975,
+   "tarefas_no_kill": {
+    "concluida": 328,
+    "executando": 4,
+    "pendente": 211
+   },
+   "resultado": [
+    {
+     "instancia": "rhsso-carga",
+     "realm": "legado",
+     "via": "realm",
+     "coletados": 468327,
+     "sql": 468327,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    }
+   ],
+   "duracao_total_s": 51
+  },
+  "5_sondas_e_modos": {
+   "ok": true,
+   "variantes": {
+    "kc26-bugdateto": {
+     "modo": "epoch_asc",
+     "sem_dateTo": true,
+     "S3": true,
+     "S4": true,
+     "ok": true,
+     "eventos": 2556
+    },
+    "kc26-semdir": {
+     "modo": "epoch_desc",
+     "sem_dateTo": false,
+     "S3": false,
+     "S4": true,
+     "ok": true,
+     "eventos": 2556
+    },
+    "kc26-curinga": {
+     "modo": "epoch_asc",
+     "sem_dateTo": false,
+     "S3": true,
+     "S4": true,
+     "ok": true,
+     "eventos": 2556
+    },
+    "rhsso (18.0.2)": {
+     "modo": "dia",
+     "ok": true
+    }
+   }
+  },
+  "6_expurgo_durante_coleta": {
+   "ok": true,
+   "investigacao": 15,
+   "resultado": [
+    {
+     "instancia": "kc26-purga",
+     "realm": "servicos",
+     "via": "realm",
+     "coletados": 362779,
+     "sql": 362779,
+     "faltando": 0,
+     "extras": 0,
+     "extras_expirados": 0,
+     "ok": true
+    }
+   ],
+   "releituras": {
+    "(sem releitura)": 475,
+    "ok": 253
+   }
+  }
+ },
+ "fim": "2026-11-27T02:13:06.419023+00:00"
+}

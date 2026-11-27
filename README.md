@@ -54,11 +54,3 @@ Para instâncias legadas (Keycloak ≤ 16, RH-SSO 7.x) inclua `/auth` na URL.
 * **Releitura** das fatias no modo dia, perto da expiração e de 10% das demais; separa “expirado durante a coleta” de “divergente”.
 * **Orçamento de carga** por instância (padrão 2 simultâneas, 5 req/s), compartilhado entre investigações.
 * Toda requisição fica registrada com o SHA-256 do corpo; o manifesto (RFC 8785) é assinado com Ed25519.
-
-## Documentos
-
-* Proposta técnica (revisada por crítico de qualidade, arquiteto e UX):
-  https://claude.ai/artifact/QgRXeSE1d1uxZDvrytJBu6
-
-> As credenciais em `infra/docker-compose.yml` e `tools/cenario.py` (`admin/admin`, `troque-este-segredo`)
-> são só da stack de teste local. Em produção, use segredos próprios; `chaves.env` e `chaves/` nunca vão para o Git.
