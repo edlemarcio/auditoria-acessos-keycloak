@@ -20,6 +20,8 @@ dashboard é um HTML gerado por investigação.
 
 ## Rodar contra a stack real (Docker)
 
+Guia passo a passo, com portas, credenciais de teste e opções da investigação: [docs/STACK_E_USO.md](docs/STACK_E_USO.md).
+
 ```bash
 ./infra/subir_e_testar.sh
 ```
