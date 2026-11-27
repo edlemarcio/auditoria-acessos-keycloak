@@ -24,3 +24,6 @@ GRANT USAGE ON SCHEMA public TO kc_auditor_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO kc_auditor_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON trilha_auditoria FROM kc_auditor_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO kc_auditor_app;
+-- tabelas e sequências criadas depois (próximos `init`) pelo papel que roda este script já nascem com as permissões
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kc_auditor_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO kc_auditor_app;

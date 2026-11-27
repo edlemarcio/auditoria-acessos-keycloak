@@ -154,6 +154,13 @@ Só o `init` precisa do papel dono.
 AUDITOR_DSN=<papel dono> AUDITOR_DSN_APP=<kc_auditor_app> python tests/w0.py <investigação>
 ```
 
+**Teste do orçamento de carga entre processos** (W0a): três processos com várias threads contra a mesma
+instância; nenhuma janela de 1 s passa de `req_por_s` e as simultâneas não passam de `concorrencia`:
+
+```bash
+AUDITOR_DSN=<kc_auditor_app> python tests/orcamento.py kc26 3 3 12
+```
+
 ## Acessos da stack de teste
 
 | O quê | Endereço | Usuário | Senha |

@@ -54,5 +54,5 @@ Para instâncias legadas (Keycloak ≤ 16, RH-SSO 7.x) inclua `/auth` na URL.
 * **Cursor de tempo** como checkpoint; eventos no mesmo milissegundo são lidos por consulta pontual
   (`dateFrom=dateTo=T`), porque a API ordena só por tempo, sem desempate.
 * **Releitura** das fatias no modo dia, perto da expiração e de 10% das demais; separa “expirado durante a coleta” de “divergente”.
-* **Orçamento de carga** por instância (padrão 2 simultâneas, 5 req/s), compartilhado entre investigações.
+* **Orçamento de carga** por instância (padrão 2 simultâneas, 5 req/s), compartilhado entre investigações e entre processos (controlado no banco do auditor).
 * Toda requisição fica registrada com o SHA-256 do corpo; o manifesto (RFC 8785) é assinado com Ed25519.

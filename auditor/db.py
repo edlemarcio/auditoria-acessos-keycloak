@@ -161,6 +161,11 @@ CREATE TRIGGER trg_trilha_ro BEFORE UPDATE OR DELETE ON trilha_auditoria
 DROP TRIGGER IF EXISTS trg_trilha_truncate ON trilha_auditoria;
 CREATE TRIGGER trg_trilha_truncate BEFORE TRUNCATE ON trilha_auditoria
   FOR EACH STATEMENT EXECUTE FUNCTION trilha_somente_insercao();
+-- orçamento de carga entre processos (kc.Orcamento): horário reservado para o próximo envio, por instância
+CREATE TABLE IF NOT EXISTS orcamento_instancia (
+  instancia_id int PRIMARY KEY REFERENCES instancia(id),
+  proximo timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS conta_extra (
   investigacao_id int,
   conta_id int,

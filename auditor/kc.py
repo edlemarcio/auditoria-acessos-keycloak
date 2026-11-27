@@ -37,27 +37,59 @@ class FalhaTemporaria(ErroKC):
 
 
 class Orcamento:
-    """Limite compartilhado por instância: requisições simultâneas e requisições por segundo."""
+    """Limite por instância, compartilhado entre **todos os processos** que usam o mesmo banco do auditor
+    (workers, API, CLI): requisições simultâneas e requisições por segundo.
 
-    def __init__(self, concorrencia: int, req_por_s: float):
-        self.sem = threading.BoundedSemaphore(concorrencia)
-        # 1% de folga: a resolução do relógio não deixa 6 envios caberem em 1 s com orçamento de 5
-        self.intervalo = 1.01 / req_por_s
-        self.proximo = time.monotonic()
-        self.lock = threading.Lock()
+    * Taxa: `orcamento_instancia.proximo` guarda o horário da próxima vaga. Quem vai enviar trava a linha, dorme até
+      o horário (sem consultar em laço) e grava a vaga seguinte a partir do horário real de envio.
+    * Concorrência: N advisory locks de sessão por instância; cada thread usa uma conexão dedicada, fora de
+      qualquer pool, e o lock é liberado ao fim da requisição ou com a queda da conexão.
+    """
+
+    CHAVE = 0x6B63   # namespace dos advisory locks ("kc")
+
+    def __init__(self, instancia_id: int, concorrencia: int, req_por_s: float):
+        self.inst_id = instancia_id
+        self.concorrencia = concorrencia
+        # 3% de folga: cobre a variação entre a liberação da vaga e o envio de fato, em processos diferentes
+        self.intervalo = 1.03 / req_por_s
+        self._local = threading.local()
+        with conectar() as cx:
+            cx.execute("INSERT INTO orcamento_instancia (instancia_id) VALUES (%s) ON CONFLICT DO NOTHING",
+                       (instancia_id,))
+
+    def _cx(self):
+        cx = getattr(self._local, "cx", None)
+        if cx is None or cx.closed:
+            cx = self._local.cx = conectar()
+        return cx
 
     def __enter__(self):
-        self.sem.acquire()
-        with self.lock:
-            agora = time.monotonic()
-            espera = self.proximo - agora
-            self.proximo = max(agora, self.proximo) + self.intervalo
-        if espera > 0:
-            time.sleep(espera)
+        cx = self._cx()
+        while True:   # vaga de concorrência
+            for slot in range(self.concorrencia):
+                if cx.execute("SELECT pg_try_advisory_lock(%s, %s) AS ok",
+                              (self.CHAVE, self.inst_id * 1024 + slot)).fetchone()["ok"]:
+                    self._local.slot = slot
+                    break
+            else:
+                time.sleep(0.05)
+                continue
+            break
+        # o lock da linha fica com quem vai enviar até o horário de envio; a vaga seguinte é calculada a partir do
+        # horário real (e não do reservado), para que um processo que acordou atrasado não encurte o intervalo
+        with cx.transaction():
+            espera = cx.execute("SELECT extract(epoch FROM proximo - clock_timestamp())::float AS espera "
+                                "FROM orcamento_instancia WHERE instancia_id=%s FOR UPDATE",
+                                (self.inst_id,)).fetchone()["espera"]
+            if espera > 0:
+                time.sleep(espera)
+            cx.execute("UPDATE orcamento_instancia SET proximo = clock_timestamp() + make_interval(secs => %s) "
+                       "WHERE instancia_id=%s", (self.intervalo, self.inst_id))
         return self
 
     def __exit__(self, *exc):
-        self.sem.release()
+        self._cx().execute("SELECT pg_advisory_unlock(%s, %s)", (self.CHAVE, self.inst_id * 1024 + self._local.slot))
 
 
 _ORCAMENTOS: dict[int, Orcamento] = {}
@@ -79,8 +111,10 @@ class ClienteKC:
         self._expira = 0.0
         self._tlock = threading.Lock()
         with _ORC_LOCK:
-            self.orc = _ORCAMENTOS.setdefault(instancia["id"], Orcamento(instancia["concorrencia"],
-                                                                         instancia["req_por_s"]))
+            if instancia["id"] not in _ORCAMENTOS:
+                _ORCAMENTOS[instancia["id"]] = Orcamento(instancia["id"], instancia["concorrencia"],
+                                                         instancia["req_por_s"])
+            self.orc = _ORCAMENTOS[instancia["id"]]
         self._log_cx = conectar() if registrar else None
         self._log_lock = threading.Lock()
         self.relogio_diferenca_s: float | None = None
