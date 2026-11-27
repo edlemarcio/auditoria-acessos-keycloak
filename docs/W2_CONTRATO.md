@@ -129,3 +129,43 @@ mudar). Escalonamento roda no laço de limpeza do worker.
 `GET /` e qualquer caminho que não comece com `/api` ou `/auth` servem `web/dist/index.html` (SPA), com os
 arquivos de `web/dist/assets/` com cache longo. CSP do W1 mantida (sem `unsafe-inline` em script). Se `web/dist` não
 existir, `/` responde 503 com texto "Interface não compilada (npm run build em web/)".
+
+## Mudanças registradas pela frente B (servidor), com o motivo
+
+1. **Corpo de erro.** O W1 respondia `{"erro", "mensagem"}`; agora é `{"codigo", "texto"}` como este contrato fixa
+   (a CLI de produção lê os dois). Erro de validação (422): `{"codigo": "validacao", "texto", "campos": [{"campo",
+   "erro"}]}`, **sem eco do valor recebido** (o padrão do FastAPI devolvia o corpo, que pode trazer o CPF).
+2. **Pedido externo direto.** `POST /api/investigacoes` com `origem` e sem `"rascunho": true` responde
+   `422 {"codigo": "documento"}`: o documento só pode ser anexado a uma investigação que já existe, e o §6 o exige
+   antes do envio. Fluxo: POST com `rascunho` → `POST .../documento` → `POST .../enviar` (a CLI faz isso com
+   `pedir --orgao ... --arquivo oficio.pdf`).
+3. **`processo`.** O POST/PUT aceita `"processo": str` (nº do processo, até 80 caracteres; sem ele vale
+   `origem.processo`). É o que a busca `q` encontra, ignorando pontuação e espaços; não aparece ao auditor interno
+   sem vínculo (para ele, `q` só casa o nº da investigação).
+4. **Campos a mais em `Investigacao`** (lista e detalhe): `status_interno`, `preservacao_urgente`, `tipo_processo`,
+   `minhas_funcoes`. O campo `alvo` do W1 passou a se chamar só `alvo_mascarado`. `de`/`ate` em ISO (UTC);
+   `inicio_ms`/`fim_ms` continuam. Estados de passagem: `abrindo`/`na_fila` → `preparando`, `coletada` → `fechando`,
+   `parcial` (coleta interrompida com fatias pendentes) → `falhou`. Rascunho descartado fica `descartada` e some das
+   listas (404 como inexistente).
+5. **Lista.** `de`/`ate` filtram pela data de criação (AAAA-MM-DD); `por_pagina` (padrão 25, máximo 100).
+6. **Detalhe.** `documento.nome` vem `null` para quem não decifra (auditor interno); `preservacao` traz também
+   `encerrada_em` e `desfecho` (`aprovada | recusada | expirada`). A `linha_do_tempo` substitui a do W1
+   (`{quando, acao}`).
+7. **Coordenação.** Atributo `coordenador=true` no usuário do realm (`infra/realm_auditor.py` cria `coordenador1`,
+   aprovador), exposto no token como claim `coordenador` e em `/api/eu`. A prorrogação exige aprovador + coordenador.
+8. **Escalonamento.** Os pedidos não têm aprovador atribuído (qualquer aprovador elegível decide). Parado há mais de
+   1 dia útil, o pedido é escalonado aos **substitutos cadastrados** (notificação `escalonamento`); há mais de 2, aos
+   coordenadores. `aguardando_minha_decisao[].escalonado` fica `true`. Os itens trazem também `lacrada`.
+9. **Quem vê.** `GET /api/substitutos`: aprovador, gestor de acesso e auditor interno. `GET .../documento`: também o
+   aprovador designado (quem aprovou). `POST .../pedir-acesso` exige ter algum perfil (sem perfil: 403), para que
+   nenhuma rota sirva a quem não tem perfil (aceite do W1).
+10. **Recertificação.** `POST /api/recertificacoes` aceita `{"usuarios": [..]?, "prazo_dias": 30}`; quem confirma é
+    o gestor de acesso (`manter: false` revoga na hora, com step-up). Vencido o prazo, o laço do worker revoga o que
+    não foi confirmado.
+11. **Notificações (`tipo`).** `pedido_recebido, preservacao_urgente, pedido_devolvido, pedido_aprovado,
+    pedido_recusado, designacao, preservacao_autorizada, preservacao_expira, escalonamento, pacote_sem_mascara,
+    decisao_pacote, coleta_concluida, coleta_falhou, papel_alterado, dek_destruida, recertificacao`. O alerta
+    `instancia_fora` do início é calculado (última requisição à instância nos últimos 10 min falhou), só para o
+    administrador técnico.
+12. **Acompanhamento.** Contagem de tarefas por instância: `limite` conta como `concluida`; `sem_permissao` e
+    `cancelada` como `falhou`. O evento SSE `heartbeat` não tem `id`.

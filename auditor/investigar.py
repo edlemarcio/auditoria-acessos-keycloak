@@ -17,6 +17,21 @@ from .kc import ClienteKC
 DIA_MS = 86400_000
 
 
+def periodo(inicio: str, fim: str, fuso: str) -> tuple[int, int]:
+    """Início e fim (exclusivo) em ms; data sem hora no fim inclui o dia inteiro."""
+    try:
+        tz = ZoneInfo(fuso)
+        ini = int(datetime.fromisoformat(inicio).replace(tzinfo=tz).timestamp() * 1000)
+        fim_ = int(datetime.fromisoformat(fim).replace(tzinfo=tz).timestamp() * 1000)
+    except (ValueError, KeyError) as e:
+        raise ValueError("Período ou fuso inválido") from e
+    if len(fim) <= 10:   # data sem hora: inclui o dia inteiro
+        fim_ += DIA_MS
+    if fim_ <= ini:
+        raise ValueError("Período inválido")
+    return ini, fim_
+
+
 def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str, fim: str,
           fuso: str = "America/Bahia", granularidade: str = "dia", instancias: list[str] | None = None,
           varredura: bool = False, base_dias: int = 0, anterior: int | None = None, status: str = "na_fila",
@@ -24,13 +39,7 @@ def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str,
     if not justificativa or len(justificativa.strip()) < 5:
         raise ValueError("Justificativa obrigatória")
     dig = normalizar(tipo, valor)
-    tz = ZoneInfo(fuso)
-    ini = int(datetime.fromisoformat(inicio).replace(tzinfo=tz).timestamp() * 1000)
-    fim_ = int(datetime.fromisoformat(fim).replace(tzinfo=tz).timestamp() * 1000)
-    if len(fim) <= 10:   # data sem hora: inclui o dia inteiro
-        fim_ += DIA_MS
-    if fim_ <= ini:
-        raise ValueError("Período inválido")
+    ini, fim_ = periodo(inicio, fim, fuso)
     h = chaves.hmac_alvo(tipo, dig)
     with conectar() as cx:
         # 'abrindo' até a DEK existir: o chaveiro só cria DEK de investigação em abertura e o alvo é cifrado com ela
