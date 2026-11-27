@@ -13,6 +13,8 @@
   python -m auditor exportar --id N --saida d/  gera XLSX, CSV, dashboard HTML e manifesto assinado
   python -m auditor verificar pacote.zip --chave-publica chaves/assinatura.pub.pem
   python -m auditor chaveiro [--porta 8443]     porteiro das chaves no modo vault (CHAVEIRO_DSN, token do Vault)
+  python -m auditor ancorar [--ate AAAA-MM-DD]  âncora diária das cadeias da trilha (o worker faz sozinho)
+  python -m auditor verificar-cadeia [--id N]   confere as cadeias da trilha e as âncoras
 
 Modo de chaves (AUDITOR_MODO): local (padrão, AUDITOR_CHAVE) ou vault (pelo chaveiro, por mTLS). No modo vault a
 identidade do processo é o certificado de chaves/servicos/: `worker` para o worker, `pacotes` para exportar e
@@ -203,6 +205,38 @@ def cmd_verificar(a):
     sys.exit(0 if ok else 1)
 
 
+def cmd_ancorar(a):
+    from datetime import date
+
+    from .ancora import ancorar_pendentes
+    with conectar() as cx:
+        feitos = ancorar_pendentes(cx, date.fromisoformat(a.ate) if a.ate else None)
+    print(f"{len(feitos)} dia(s) ancorado(s)" + (f": {feitos[0]} a {feitos[-1]}" if feitos else ""))
+
+
+def cmd_verificar_cadeia(a):
+    from .ancora import folha_cabeca, verificar_carimbo
+    from .db import verificar_cadeia
+    from .merkle import raiz
+    ok = True
+    with conectar() as cx:
+        for cad, probs in sorted(verificar_cadeia(cx, a.id).items()):
+            ok &= not probs
+            print(f"[{'ok' if not probs else 'FALHA'}] cadeia {cad}" + "".join(f"\n    {p}" for p in probs[:10]))
+        for an in cx.execute("SELECT * FROM ancora ORDER BY dia"):
+            ok_a = raiz([folha_cabeca(c) for c in an["cabecas"]]) == an["raiz"] and verificar_carimbo(an["carimbo"],
+                                                                                                    an["raiz"])
+            for c in an["cabecas"]:   # a cabeça ancorada tem de existir na cadeia de hoje
+                r = cx.execute("SELECT hash FROM trilha_auditoria WHERE cadeia=%s AND seq=%s",
+                               (c["cadeia"], c["seq"])).fetchone()
+                ok_a &= bool(r) and r["hash"] == c["hash"]
+            ok &= ok_a
+            if not ok_a or a.verboso:
+                print(f"[{'ok' if ok_a else 'FALHA'}] âncora {an['dia']} ({an['carimbo']['tipo']})")
+    print("cadeias e âncoras íntegras" if ok else "FALHA na verificação")
+    sys.exit(0 if ok else 1)
+
+
 def cmd_chaveiro(a):
     from .chaveiro import servir
     servir(a.porta, Path(a.certs))
@@ -250,6 +284,10 @@ def main():
     p.add_argument("--sem-mascara", action="store_true"); p.set_defaults(f=cmd_exportar)
     p = sp.add_parser("verificar"); p.add_argument("pacote"); p.add_argument("--chave-publica", required=True)
     p.set_defaults(f=cmd_verificar)
+    p = sp.add_parser("ancorar"); p.add_argument("--ate"); p.set_defaults(f=cmd_ancorar)
+    p = sp.add_parser("verificar-cadeia"); p.add_argument("--id", type=int); p.add_argument("--verboso",
+                                                                                        action="store_true")
+    p.set_defaults(f=cmd_verificar_cadeia)
     p = sp.add_parser("chaveiro"); p.add_argument("--porta", type=int, default=8443)
     p.add_argument("--certs", default="chaves/servicos"); p.set_defaults(f=cmd_chaveiro)
     a = ap.parse_args()

@@ -173,8 +173,10 @@ def worker(threads: int = 4, ocioso_s: float | None = None, parar: threading.Eve
                         continue
                     if ocioso_s is not None and agora - ultimo > ocioso_s:
                         return
-                    if n == 0 and agora - faxina > 60:   # uma thread cuida dos leases vencidos
+                    if n == 0 and agora - faxina > 60:   # uma thread cuida dos leases vencidos e da âncora diária
                         coleta.devolver_leases_vencidos(cx)
+                        from .ancora import ancorar_pendentes
+                        ancorar_pendentes(cx)
                         faxina = agora
                     parar.wait(1.0)
         finally:

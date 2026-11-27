@@ -183,6 +183,38 @@ def desenvolver_local(envelope: bytes, inv_id: int, classe: str) -> bytes:
     return AESGCM(_chave(FINALIDADE_KEK_LOCAL)).decrypt(e[:12], e[12:], f"kc-auditor/kek|{inv_id}|{classe}".encode())
 
 
+# ------------------------------------------------------------------ campos livres da trilha (X25519 + AES-GCM)
+def par_trilha() -> tuple[bytes, bytes]:
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    k = X25519PrivateKey.generate()
+    return (k.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw),
+            k.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()))
+
+
+def _chave_selada(compartilhado: bytes, efemera: bytes, publica: bytes) -> bytes:
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=efemera + publica,
+                info=b"kc-auditor/trilha-livres/v1").derive(compartilhado)
+
+
+def selar_para(publica: bytes, dados: bytes, aad_: bytes) -> bytes:
+    """Cifra para a chave pública (só quem tem a privada lê): efêmera(32) + nonce(12) + cifrado."""
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+    e = X25519PrivateKey.generate()
+    ep = e.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    k = _chave_selada(e.exchange(X25519PublicKey.from_public_bytes(publica)), ep, publica)
+    nonce = os.urandom(12)
+    return ep + nonce + AESGCM(k).encrypt(nonce, dados, aad_)
+
+
+def abrir_selado(privada: bytes, publica: bytes, blob: bytes, aad_: bytes) -> bytes:
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+    blob = bytes(blob)
+    ep, nonce, ct = blob[:32], blob[32:44], blob[44:]
+    k = _chave_selada(X25519PrivateKey.from_private_bytes(privada).exchange(X25519PublicKey.from_public_bytes(ep)),
+                      ep, publica)
+    return AESGCM(k).decrypt(nonce, ct, aad_)
+
+
 def gerar_chaves(destino: Path) -> tuple[str, Path]:
     destino.mkdir(parents=True, exist_ok=True)
     priv = Ed25519PrivateKey.generate()

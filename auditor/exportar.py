@@ -222,6 +222,16 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
                                                 "Código", "Quantidade", "IPs distintos"], jan),
         f"dashboard_{inv_id}.html": dashboard.gerar(d, vis).encode(),
     }
+    # trilha da investigação sem textos livres (só compromissos) e as provas de inclusão nas âncoras diárias
+    from .ancora import provas_da_cadeia
+    from .db import registro_trilha
+    import rfc8785
+    with conectar() as cx:
+        tr = cx.execute("SELECT * FROM trilha_auditoria WHERE cadeia=%s ORDER BY seq", (inv_id,)).fetchall()
+        provas = provas_da_cadeia(cx, inv_id)
+    arquivos["trilha.jsonl"] = b"".join(rfc8785.dumps({**registro_trilha(r), "hash": r["hash"]}) + b"\n" for r in tr)
+    for pr in provas:
+        arquivos[f"ancoras/{pr['dia']}.json"] = json.dumps(pr, ensure_ascii=False, indent=1).encode()
     contas_por_id = {c["id"]: c for c in d["contas"]}
     arquivos["fatias.json"] = json.dumps(
         [{**{k: v for k, v in f.items() if k not in ("conta_id", "instancia_id")},
@@ -258,6 +268,10 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
                               "conta": vis.conta(c), "eventos": c["eventos"],
                               **({"user_id": c["user_id"]} if sem_mascara else {})} for c in excluidas],
         "cobertura": {"realms": list(fr["realms"]), "tempo": list(fr["tempo"])},
+        "trilha": {"entradas": len(tr), "cabeca": {"seq": tr[-1]["seq"], "hash": tr[-1]["hash"]} if tr else None,
+                   "ancoras": [p["dia"] for p in provas],
+                   "formato": "registro = RFC 8785 dos campos estruturados + compromissos dos campos livres + hash "
+                              "anterior; folha da âncora = SHA-256(0x00 ‖ RFC 8785({cadeia, seq, hash}))"},
         "custodia": {"raiz_merkle": cust["raiz"], "fatias_seladas": len(cust["fatias"]),
                      "eventos_selados": cust["eventos_selados"], "eventos_sem_selo": cust["eventos_sem_selo"],
                      "versoes_divergentes": cust["divergencias"],

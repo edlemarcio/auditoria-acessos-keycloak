@@ -28,7 +28,6 @@ from pathlib import Path
 
 import httpx
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from . import siem
@@ -70,11 +69,11 @@ class Chaveiro:
 
     # ---------------------------------------------------------------- registro
     def _registrar(self, cn: str, acao: str, inv_id: int | None, ok: bool, **det):
-        with self.pool.connection() as cx:
-            cx.execute("INSERT INTO trilha_auditoria (operador, acao, investigacao_id, detalhe) VALUES (%s,%s,%s,%s)",
-                       (f"chaveiro:{cn}", acao, inv_id, Jsonb(det)))
+        from .db import trilha
+        with self.pool.connection() as cx:   # entra na cadeia da investigação, como qualquer registro
+            trilha(cx, f"chaveiro:{cn}", acao, inv_id, **{k: v for k, v in det.items() if v is not None})
         siem.enviar(acao, "info" if ok else "alerta", servico=cn, investigacao=inv_id,
-                    finalidade=det.get("finalidade"), classe=det.get("classe"), motivo_codigo=det.get("motivo"))
+                    finalidade=det.get("finalidade"), classe=det.get("classe"), motivo_codigo=det.get("motivo_codigo"))
         if ok:
             self._medir(cn)
 
@@ -263,7 +262,7 @@ def servir(porta: int = 8443, certs: Path = Path("chaves/servicos")):
             except Negado as e:
                 inv = c.get("investigacao") if isinstance(c, dict) else None
                 ch._registrar(cn, "recusar_dek" if "dek" in self.path else "recusar_chave", inv, False,
-                              finalidade=c.get("finalidade"), classe=c.get("classe"), motivo=e.codigo)
+                              finalidade=c.get("finalidade"), classe=c.get("classe"), motivo_codigo=e.codigo)
                 self._responder(403, {"motivo": str(e), "codigo": e.codigo})
             except (KeyError, ValueError) as e:
                 self._responder(400, {"motivo": f"pedido inválido: {type(e).__name__}"})

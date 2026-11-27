@@ -27,6 +27,7 @@ GRANT USAGE ON SCHEMA public TO kc_auditor_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO kc_auditor_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON trilha_auditoria FROM kc_auditor_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON selo FROM kc_auditor_app;   -- selos: só inserção (W0b)
+REVOKE UPDATE, DELETE, TRUNCATE ON ancora FROM kc_auditor_app; -- âncoras: só inserção (W0b)
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO kc_auditor_app;
 -- tabelas e sequências criadas depois (próximos `init`) pelo papel que roda este script já nascem com as permissões
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kc_auditor_app;
@@ -48,5 +49,6 @@ GRANT SELECT (investigacao_id, tipo, status) ON job TO kc_chaveiro;
 GRANT SELECT (id, nome, segredo_cifrado) ON instancia TO kc_chaveiro;
 GRANT SELECT, INSERT ON chave_investigacao TO kc_chaveiro;
 GRANT INSERT ON trilha_auditoria TO kc_chaveiro;
+GRANT SELECT (cadeia, seq, hash) ON trilha_auditoria TO kc_chaveiro;   -- encadeamento (W0b)
 GRANT USAGE ON SEQUENCE trilha_auditoria_id_seq TO kc_chaveiro;
 \endif

@@ -18,7 +18,7 @@ from . import chaves, redigir, sigilo
 from .manifesto import linhas_eventos, sha256
 
 TABELAS = ("evento", "conta", "requisicao", "conta_extra", "investigacao", "tarefa", "historico_identidade",
-           "job", "selo")
+           "job", "selo", "trilha_auditoria")
 
 
 def _hashes(eventos: list[dict], reqs: list[dict]) -> tuple[str, str]:
@@ -135,6 +135,54 @@ def migrar_selos(cx, inv: dict) -> int:
     return n
 
 
+def migrar_trilha(cx) -> int:
+    """Encadeia os registros anteriores à W0b (por investigação, na ordem em que foram gravados), tira os campos
+    livres do detalhe (cifrados para a chave pública da investigação; no hash, só o compromisso com sal) e cria o par
+    de chaves da trilha das investigações antigas. Exige o papel dono: o trigger da trilha é desligado só durante a
+    conversão, dentro da transação."""
+    from psycopg.types.json import Jsonb as J
+
+    from . import cripto
+    from .db import CAMPOS_LIVRES, aad_livres, compromisso_livre, genese, hash_registro
+    with cx.transaction():
+        for inv in cx.execute("SELECT id FROM investigacao WHERE trilha_publica IS NULL AND status <> 'abrindo'").fetchall():
+            cf = sigilo.Cofre(inv["id"], "migrar")
+            pub, priv = cripto.par_trilha()
+            cx.execute("UPDATE investigacao SET trilha_publica=%s, trilha_privada_cifrada=%s WHERE id=%s",
+                       (pub, cripto.cifrar_dek(cf.dek, priv, cripto.aad(inv["id"], "investigacao", "trilha_privada",
+                                                                        inv["id"])), inv["id"]))
+        cadeias = [r["c"] for r in cx.execute("SELECT DISTINCT coalesce(investigacao_id, 0) AS c FROM trilha_auditoria "
+                                              "WHERE hash IS NULL")]
+        if not cadeias:
+            return 0
+        pubs = {r["id"]: r["trilha_publica"] for r in cx.execute("SELECT id, trilha_publica FROM investigacao")}
+        cx.execute("ALTER TABLE trilha_auditoria DISABLE TRIGGER trg_trilha_ro")
+        n = 0
+        for cad in cadeias:
+            ant = genese(cad)
+            for seq, r in enumerate(cx.execute("SELECT * FROM trilha_auditoria WHERE coalesce(investigacao_id, 0)=%s "
+                                               "ORDER BY id", (cad,)).fetchall(), 1):
+                det = dict(r["detalhe"] or {})
+                livres = {k: det.pop(k) for k in CAMPOS_LIVRES if det.get(k) is not None}
+                comp = cif = None
+                if livres:
+                    sais = {k: os.urandom(32) for k in livres}
+                    comp = {k: compromisso_livre(sais[k], v) for k, v in livres.items()}
+                    if pubs.get(cad):
+                        cif = cripto.selar_para(bytes(pubs[cad]), json.dumps(
+                            {k: {"valor": v, "sal": sais[k].hex()} for k, v in livres.items()},
+                            ensure_ascii=False).encode(), aad_livres(cad, seq))
+                novo = {**r, "cadeia": cad, "seq": seq, "detalhe": det, "livres_compromisso": comp,
+                        "hash_anterior": ant}
+                h = hash_registro(novo)
+                cx.execute("UPDATE trilha_auditoria SET cadeia=%s, seq=%s, detalhe=%s, livres_compromisso=%s, "
+                           "livres_cifrado=%s, hash_anterior=%s, hash=%s WHERE id=%s",
+                           (cad, seq, J(det), J(comp) if comp else None, cif, ant, h, r["id"]))
+                ant, n = h, n + 1
+        cx.execute("ALTER TABLE trilha_auditoria ENABLE TRIGGER trg_trilha_ro")
+    return n
+
+
 def migrar_historico(cx) -> int:
     n = 0
     with cx.transaction():
@@ -165,7 +213,8 @@ def migrar(cx) -> dict:
     selos = sum(migrar_selos(cx, inv) for inv in cx.execute(
         "SELECT * FROM investigacao WHERE status <> 'abrindo' ORDER BY id").fetchall())
     hist = migrar_historico(cx)
-    if feitas or hist or selos:
+    trilha_n = migrar_trilha(cx)
+    if feitas or hist or selos or trilha_n:
         for t in TABELAS:
             cx.execute(f"VACUUM FULL {t}")
-    return {"investigacoes": len(feitas), "historico": hist, "selos_retroativos": selos}
+    return {"investigacoes": len(feitas), "historico": hist, "selos_retroativos": selos, "trilha_encadeada": trilha_n}

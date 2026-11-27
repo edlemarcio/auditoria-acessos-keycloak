@@ -40,10 +40,14 @@ def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str,
                         Jsonb({"instancias": instancias, "varredura": varredura, "base_dias": base_dias}),
                         anterior)).fetchone()
         dek = chaves.criar_deks(cx, r["id"])
-        cx.execute("UPDATE investigacao SET alvo_cifrado=%s, justificativa_cifrada=%s, status='na_fila' WHERE id=%s",
+        pub, priv = cripto.par_trilha()   # campos livres da trilha: qualquer serviço registra, só a DEK lê
+        cx.execute("UPDATE investigacao SET alvo_cifrado=%s, justificativa_cifrada=%s, trilha_publica=%s, "
+                   "trilha_privada_cifrada=%s, status='na_fila' WHERE id=%s",
                    (chaves.cifrar_alvo(r["id"], dek, dig),
                     cripto.cifrar_dek(dek, json.dumps(justificativa, ensure_ascii=False),
-                                      cripto.aad(r["id"], "investigacao", "justificativa", r["id"])), r["id"]))
+                                      cripto.aad(r["id"], "investigacao", "justificativa", r["id"])),
+                    pub, cripto.cifrar_dek(dek, priv, cripto.aad(r["id"], "investigacao", "trilha_privada", r["id"])),
+                    r["id"]))
         trilha(cx, operador, "abrir_investigacao", r["id"], tipo=tipo, alvo=mascarar(tipo, dig),
                justificativa=justificativa, inicio=inicio, fim=fim)
         return r["id"]

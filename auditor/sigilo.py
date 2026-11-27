@@ -106,3 +106,15 @@ def abrir_extra(cf: Cofre, x: dict) -> dict:
     if x.get("cifrado") is None:
         return x
     return {**x, "dados": cf.decifrar("conta_extra", "dados", x["id"], x["cifrado"])}
+
+
+def livres_trilha(cf: Cofre, inv: dict, r: dict) -> dict:
+    """Campos livres de um registro da trilha, em claro, com o sal (para conferir o compromisso)."""
+    from . import cripto
+    from .db import aad_livres
+    if r.get("livres_cifrado") is None:
+        return {}
+    priv = cripto.decifrar_dek(cf.dek, inv["trilha_privada_cifrada"],
+                               cripto.aad(inv["id"], "investigacao", "trilha_privada", inv["id"]))
+    return json.loads(cripto.abrir_selado(priv, bytes(inv["trilha_publica"]), r["livres_cifrado"],
+                                          aad_livres(r["cadeia"], r["seq"])))

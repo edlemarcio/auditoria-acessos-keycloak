@@ -300,6 +300,47 @@ troca a folha e os cifrados no banco do auditor e tenta exportar. As trocas são
 AUDITOR_DSN=<kc_auditor_app> AUDITOR_DSN_DONO=<dono> KC_DSN_kc26=... KC_DSN_kc18=... python tests/selos.py 1 9 10
 ```
 
+### Trilha encadeada e âncora diária (W0b, parte 4)
+
+A trilha tem **uma cadeia por investigação**, mais uma global (cadeia 0) para o que não tem investigação. Cada
+registro guarda o hash do anterior, e o hash cobre os campos estruturados mais o **compromisso com sal** dos campos
+livres (justificativa, motivo, alvo mascarado). O texto em si não entra no hash. Ele fica cifrado para a chave
+pública X25519 da investigação: qualquer serviço consegue registrar, só quem tem a DEK lê, e o expurgo da DEK destrói
+os textos sem quebrar a cadeia. Os selos de fatia e as entregas e recusas do `chaveiro` entram na cadeia da
+investigação.
+
+Uma vez por dia (o worker faz sozinho, ou `python -m auditor ancorar`), as cabeças de todas as cadeias entram numa
+árvore Merkle, e a raiz recebe carimbo do tempo. Até a contratação da ACT ICP-Brasil, o carimbo é **simulado**:
+Ed25519 com a chave local `chaves/act_simulada.pem`, marcado `"tipo": "simulado"`. O pacote leva o `trilha.jsonl`,
+com a cadeia da investigação sem textos livres, e `ancoras/<dia>.json` com a prova de inclusão da cabeça da cadeia
+naquela árvore. Um terceiro consegue recalcular a cadeia e conferir a prova só com o pacote, sem ver as outras
+cadeias.
+
+```bash
+python -m auditor verificar-cadeia [--id N]   # continuidade e hash de cada registro, âncoras e carimbos
+```
+
+O `init` encadeia os registros antigos, na ordem em que foram gravados. Para isso desliga o trigger da trilha dentro
+da transação, o que exige o papel dono.
+
+**Teste de aceite da cadeia.** Ele adultera a trilha como DBA (altera e apaga um registro) e depois desfaz:
+
+```bash
+AUDITOR_DSN=<kc_auditor_app> AUDITOR_DSN_DONO=<dono> KC_DSN_kc26=... KC_DSN_kc18=... python tests/cadeia.py
+```
+
+### O que a W0b deixou para depois
+
+| Item | Situação |
+| --- | --- |
+| DEK de terceiros (`DEK_t`) | Criada para toda investigação. A recifragem de uma conta excluída com a `DEK_t` (e de volta, na reinclusão) entra com a tela de inclusão e exclusão de contas (W2). Hoje nada é coletado de terceiros |
+| Carimbo do tempo | Simulado até a ACT (dependência externa) |
+| Vault | Um nó, abertura manual. Produção: 3 nós (Raft), auto-unseal e TLS no listener. Certificados mTLS de 7 dias, reemitidos com `vault_setup.py --certificados` (sem rotação automática ainda) |
+| Identidade `api` | Recusada pelo `chaveiro` até a W1 (token OIDC do usuário designado) |
+| `assinador` e pacote v2 completo | W5 (`folhas.jsonl` com sais, `eventos_pseudonimizados.jsonl`, `pseudonimos.csv`, manifesto sem texto livre) |
+| Papel `kc_coleta` separado | A aplicação usa um papel só. `selo`, `ancora` e trilha aceitam só inserção (trigger e permissões) |
+| Pedidos ao `chaveiro` | Com o cache de 5 min, uma investigação gera poucos pedidos (no teste: 1 por finalidade e processo). A medição sob carga fica para o teste de carga da W6 |
+
 ## Acessos da stack de teste
 
 | O quê | Endereço | Usuário | Senha |
