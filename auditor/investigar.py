@@ -1,0 +1,195 @@
+"""Ciclo de uma investigação: abrir, preparar (descoberta + localização + plano), coletar, fechar cobertura."""
+from __future__ import annotations
+
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from psycopg.types.json import Jsonb
+
+from . import coleta, descoberta
+from .cripto import cifrar, decifrar, hmac_alvo
+from .db import conectar, trilha
+from .identificador import mascarar, normalizar
+from .kc import ClienteKC
+
+DIA_MS = 86400_000
+
+
+def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str, fim: str,
+          fuso: str = "America/Bahia", granularidade: str = "dia", instancias: list[str] | None = None,
+          varredura: bool = False, base_dias: int = 0, anterior: int | None = None) -> int:
+    if not justificativa or len(justificativa.strip()) < 5:
+        raise ValueError("Justificativa obrigatória")
+    dig = normalizar(tipo, valor)
+    tz = ZoneInfo(fuso)
+    ini = int(datetime.fromisoformat(inicio).replace(tzinfo=tz).timestamp() * 1000)
+    fim_ = int(datetime.fromisoformat(fim).replace(tzinfo=tz).timestamp() * 1000)
+    if len(fim) <= 10:   # data sem hora: inclui o dia inteiro
+        fim_ += DIA_MS
+    if fim_ <= ini:
+        raise ValueError("Período inválido")
+    with conectar() as cx:
+        r = cx.execute("INSERT INTO investigacao (operador, justificativa, tipo, alvo_cifrado, alvo_hmac, "
+                       "alvo_mascarado, inicio_ms, fim_ms, fuso, granularidade, parametros, execucao_anterior) "
+                       "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                       (operador, justificativa, tipo, cifrar(dig), hmac_alvo(tipo, dig), mascarar(tipo, dig),
+                        ini, fim_, fuso, granularidade,
+                        Jsonb({"instancias": instancias, "varredura": varredura, "base_dias": base_dias}),
+                        anterior)).fetchone()
+        trilha(cx, operador, "abrir_investigacao", r["id"], tipo=tipo, alvo=mascarar(tipo, dig),
+               justificativa=justificativa, inicio=inicio, fim=fim)
+        return r["id"]
+
+
+def preparar(inv_id: int, contas_informadas: list[tuple[str, str, str]] | None = None) -> dict:
+    """Descoberta, localização (atributo, username, histórico), quadro de contas e plano de tarefas."""
+    with conectar() as cx:
+        inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
+        dig = decifrar(inv["alvo_cifrado"])
+        nomes = inv["parametros"].get("instancias")
+        insts = [i for i in cx.execute("SELECT * FROM instancia ORDER BY id").fetchall()
+                 if not nomes or i["nome"] in nomes]
+        resumo = {"instancias": {}, "contas": 0}
+        snaps = {}
+        for inst in insts:
+            cli = ClienteKC(inst, inv_id)
+            try:
+                realms = descoberta.descobrir(cx, inst, cli)
+                for s in realms:
+                    snaps[(inst["id"], s["realm"])] = s
+                achadas, erros = descoberta.localizar(cli, inst, realms, inv["tipo"], dig)
+            finally:
+                cli.fechar()
+            for u in achadas:
+                fed = "LDAP" if u.get("federationLink") else "local"
+                cx.execute("INSERT INTO conta (investigacao_id, instancia_id, realm, user_id, username, email, "
+                           "criado_ms, habilitada, origem, via) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                           "ON CONFLICT DO NOTHING",
+                           (inv_id, inst["id"], u["realm"], u["id"], u["username"], u.get("email"),
+                            u.get("createdTimestamp"), u.get("enabled"), fed, u["via"]))
+                cx.execute("INSERT INTO historico_identidade (alvo_hmac, instancia_id, realm, user_id, username) "
+                           "VALUES (%s,%s,%s,%s,%s) ON CONFLICT (alvo_hmac, instancia_id, realm, user_id) "
+                           "DO UPDATE SET visto_em=now()", (inv["alvo_hmac"], inst["id"], u["realm"], u["id"],
+                                                            u["username"]))
+            # contas vistas em investigações anteriores e que não existem mais (excluídas)
+            for h in cx.execute("SELECT * FROM historico_identidade WHERE alvo_hmac=%s AND instancia_id=%s",
+                                (inv["alvo_hmac"], inst["id"])).fetchall():
+                cx.execute("INSERT INTO conta (investigacao_id, instancia_id, realm, user_id, username, origem, via)"
+                           " VALUES (%s,%s,%s,%s,%s,'histórico','historico') ON CONFLICT DO NOTHING",
+                           (inv_id, inst["id"], h["realm"], h["user_id"], h["username"]))
+            for nome_inst, realm, uid in contas_informadas or []:
+                if nome_inst == inst["nome"] and uid == "*":   # realm inteiro (teste de carga)
+                    cx.execute("INSERT INTO conta (investigacao_id, instancia_id, realm, user_id, username, origem, via)"
+                               " VALUES (%s,%s,%s,NULL,'(realm inteiro)','teste','realm') ON CONFLICT DO NOTHING",
+                               (inv_id, inst["id"], realm))
+                elif nome_inst == inst["nome"]:
+                    cx.execute("INSERT INTO conta (investigacao_id, instancia_id, realm, user_id, origem, via) "
+                               "VALUES (%s,%s,%s,%s,'informada','informada') ON CONFLICT DO NOTHING",
+                               (inv_id, inst["id"], realm, uid))
+            if inv["parametros"].get("varredura"):
+                for s in realms:
+                    if s["visivel"] and s["status"] in ("ok", "federacao_sem_importacao"):
+                        cx.execute("INSERT INTO conta (investigacao_id, instancia_id, realm, user_id, username, "
+                                   "origem, via) VALUES (%s,%s,%s,NULL,'(falhas sem userId)','varredura',"
+                                   "'varredura') ON CONFLICT DO NOTHING", (inv_id, inst["id"], s["realm"]))
+            resumo["instancias"][inst["nome"]] = {"realms": len(realms), "erros": erros,
+                                                  "contas": len(achadas)}
+        contas = cx.execute("SELECT * FROM conta WHERE investigacao_id=%s", (inv_id,)).fetchall()
+        resumo["contas"] = len(contas)
+        # duplicidade no mesmo realm
+        dup = cx.execute("SELECT instancia_id, realm, count(*) n FROM conta WHERE investigacao_id=%s "
+                         "AND via IN ('atributo','username') GROUP BY 1,2 HAVING count(*)>1", (inv_id,)).fetchall()
+        resumo["duplicidades"] = [(d["instancia_id"], d["realm"], d["n"]) for d in dup]
+        base = inv["parametros"].get("base_dias") or 0
+        inv_plano = {**inv, "inicio_ms": inv["inicio_ms"] - base * DIA_MS}
+        insts_d = {i["id"]: i for i in insts}
+        coleta.planejar(cx, inv_plano, contas, insts_d, snaps)
+        resumo["tarefas"] = cx.execute("SELECT count(*) n FROM tarefa WHERE investigacao_id=%s",
+                                       (inv_id,)).fetchone()["n"]
+        cx.execute("UPDATE investigacao SET status='na_fila' WHERE id=%s", (inv_id,))
+        trilha(cx, inv["operador"], "preparar_investigacao", inv_id, contas=len(contas),
+               tarefas=resumo["tarefas"])
+        return resumo
+
+
+def fechar(inv_id: int) -> dict:
+    """Calcula a cobertura por par realm × conta e o status final."""
+    agora = int(time.time() * 1000)
+    with conectar() as cx:
+        inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
+        cx.execute("DELETE FROM cobertura WHERE investigacao_id=%s", (inv_id,))
+        snaps = cx.execute("SELECT DISTINCT ON (instancia_id, realm) * FROM realm_snapshot WHERE lido_em >= %s "
+                           "ORDER BY instancia_id, realm, lido_em DESC", (inv["criado_em"],)).fetchall()
+        nomes = inv["parametros"].get("instancias")
+        insts = {i["id"]: i for i in cx.execute("SELECT * FROM instancia").fetchall()
+                 if not nomes or i["nome"] in nomes}
+        snaps = [s for s in snaps if s["instancia_id"] in insts]
+        contas = cx.execute("SELECT * FROM conta WHERE investigacao_id=%s AND incluida AND via<>'varredura'",
+                            (inv_id,)).fetchall()
+        tarefas = cx.execute("SELECT conta_id, status, releitura, inicio_ms, fim_ms FROM tarefa "
+                             "WHERE investigacao_id=%s AND inicio_ms >= %s", (inv_id, inv["inicio_ms"])).fetchall()
+        por_conta: dict[int, list] = {}
+        for t in tarefas:
+            por_conta.setdefault(t["conta_id"], []).append(t)
+        linhas = []
+        for s in snaps:
+            cs = [c for c in contas if c["instancia_id"] == s["instancia_id"] and c["realm"] == s["realm"]]
+            if not cs:
+                if s["status"] in ("esperado_invisivel", "sem_permissao", "atributo_nao_pesquisavel"):
+                    linhas.append((s, None, "sem_dados", s["status"], s["detalhe"], s["acao"], None))
+                elif s["status"] == "federacao_sem_importacao":
+                    linhas.append((s, None, "parcial", s["status"], s["detalhe"], s["acao"], None))
+                else:
+                    linhas.append((s, None, "coberto", "pesquisado_sem_conta",
+                                   "Realm pesquisado; nenhuma conta com este identificador", None, None))
+                continue
+            for c in cs:
+                motivos, classe, desde = [], "coberto", None
+                if s["status"] in ("eventos_nao_gravados", "tipo_nao_gravado", "sem_permissao"):
+                    motivos.append((s["status"], s["detalhe"], s["acao"])); classe = "sem_dados"
+                elif s["status"] == "falhas_nao_gravadas":
+                    motivos.append((s["status"], s["detalhe"], s["acao"])); classe = "parcial"
+                exp = (s["config"] or {}).get("eventsExpiration")
+                if exp and inv["inicio_ms"] < agora - exp * 1000:
+                    desde = agora - exp * 1000
+                    motivos.append(("retencao_insuficiente",
+                                    f"Retenção de {exp // 86400} dias: cobre desde "
+                                    f"{datetime.fromtimestamp(desde / 1000, ZoneInfo(inv['fuso'])):%d/%m/%Y}",
+                                    "Aumentar a retenção (eventsExpiration)"))
+                    classe = "parcial" if classe == "coberto" else classe
+                ts = por_conta.get(c["id"], [])
+                ruins = [t for t in ts if t["status"] in ("falhou", "sem_permissao", "pendente", "executando")]
+                if ts and len(ruins) == len(ts):
+                    motivos.append(("erro", "Coleta não concluída", "Retomar a investigação")); classe = "sem_dados"
+                elif ruins:
+                    motivos.append(("erro", f"{len(ruins)} dia(s) sem coleta concluída", "Retomar"))
+                    classe = "parcial" if classe == "coberto" else classe
+                for st, rotulo in (("limite", "limite atingido"),):
+                    n = sum(1 for t in ts if t["status"] == st)
+                    if n:
+                        motivos.append((st, f"{n} dia(s) com {rotulo} (incompleto)", "Acionar a equipe IAM"))
+                        classe = "parcial" if classe == "coberto" else classe
+                for rel, rotulo in (("divergente", "divergente na releitura"), ("expirado", "expirado durante a coleta")):
+                    dias = [t for t in ts if t["releitura"] == rel]
+                    if dias:
+                        ds = ", ".join(sorted({datetime.fromtimestamp(t["inicio_ms"] / 1000, ZoneInfo(inv["fuso"]))
+                                               .strftime("%d/%m") for t in dias}))
+                        motivos.append((rel, f"{rotulo}: {ds}", "Recoletar" if rel == "divergente" else None))
+                        classe = "parcial" if classe == "coberto" else classe
+                if not motivos:
+                    motivos.append(("ok", "Coberto", None))
+                linhas.append((s, c, classe, "; ".join(m[0] for m in motivos), "; ".join(m[1] for m in motivos if m[1]),
+                               "; ".join(m[2] for m in motivos if m[2]) or None, desde))
+        for s, c, classe, st, det, acao, desde in linhas:
+            cx.execute("INSERT INTO cobertura (investigacao_id, instancia_id, realm, conta_id, classe, status, "
+                       "detalhe, acao, desde_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                       (inv_id, s["instancia_id"], s["realm"], c["id"] if c else None, classe, st, det, acao, desde))
+        pend = cx.execute("SELECT count(*) n FROM tarefa WHERE investigacao_id=%s AND status IN "
+                          "('pendente','executando')", (inv_id,)).fetchone()["n"]
+        lacunas = any(cl != "coberto" for _, _, cl, *_ in linhas)
+        status = "parcial" if pend else ("concluida_com_lacunas" if lacunas else "concluida")
+        cx.execute("UPDATE investigacao SET status=%s, concluido_em=CASE WHEN %s THEN NULL ELSE now() END "
+                   "WHERE id=%s", (status, bool(pend), inv_id))
+        trilha(cx, inv["operador"], "fechar_investigacao", inv_id, status=status)
+        return {"status": status, "pares": len(linhas)}

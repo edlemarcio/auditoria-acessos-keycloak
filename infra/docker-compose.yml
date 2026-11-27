@@ -1,0 +1,102 @@
+# Stack de teste com duas instâncias de SSO e o banco do auditor.
+#
+#   kc26   Keycloak 26.8.2 (última versão em 26/11/2026)            http://localhost:8080
+#   kc18   Keycloak 18.0.2 legado (WildFly), base do RH-SSO 7.6     http://localhost:8081/auth
+#   rhsso  RH-SSO 7.6 oficial (opcional, perfil "rhsso")             http://localhost:8082/auth
+#          exige: docker login registry.redhat.io
+#
+#   docker compose up -d                     # kc26 + kc18 + bancos
+#   docker compose --profile rhsso up -d     # inclui o RH-SSO oficial
+#
+# Os bancos expõem portas para o gerador de eventos (tools/gerar_eventos.py) gravar direto na EVENT_ENTITY.
+name: kc-auditor
+
+x-pg: &pg
+  image: postgres:16
+  environment: &pgenv
+    POSTGRES_DB: keycloak
+    POSTGRES_USER: keycloak
+    POSTGRES_PASSWORD: keycloak
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U keycloak"]
+    interval: 5s
+    retries: 20
+
+services:
+  pg-kc26:
+    <<: *pg
+    ports: ["5433:5432"]
+    volumes: [pg-kc26:/var/lib/postgresql/data]
+
+  kc26:
+    image: quay.io/keycloak/keycloak:26.8.2
+    command: start-dev --health-enabled=true
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://pg-kc26:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      JAVA_OPTS_KC_HEAP: "-Xms512m -Xmx1g"
+    ports: ["8080:8080"]
+    depends_on:
+      pg-kc26: {condition: service_healthy}
+
+  pg-kc18:
+    <<: *pg
+    ports: ["5434:5432"]
+    volumes: [pg-kc18:/var/lib/postgresql/data]
+
+  kc18:
+    image: quay.io/keycloak/keycloak:18.0.2-legacy
+    environment:
+      DB_VENDOR: postgres
+      DB_ADDR: pg-kc18
+      DB_DATABASE: keycloak
+      DB_USER: keycloak
+      DB_PASSWORD: keycloak
+      KEYCLOAK_USER: admin
+      KEYCLOAK_PASSWORD: admin
+      # fuso da JVM diferente de UTC, para exercitar a sonda S6 (o 18.x interpreta yyyy-MM-dd no fuso da JVM)
+      TZ: America/Sao_Paulo
+      JAVA_OPTS: "-Xms512m -Xmx1g -Duser.timezone=America/Sao_Paulo -Djava.net.preferIPv4Stack=true"
+    ports: ["8081:8080"]
+    depends_on:
+      pg-kc18: {condition: service_healthy}
+
+  # RH-SSO 7.6 oficial. Variáveis no padrão das imagens OpenShift da Red Hat — validar na F0.
+  pg-rhsso:
+    <<: *pg
+    profiles: [rhsso]
+    ports: ["5436:5432"]
+  rhsso:
+    profiles: [rhsso]
+    image: registry.redhat.io/rh-sso-7/sso76-openshift-rhel8:latest
+    environment:
+      SSO_ADMIN_USERNAME: admin
+      SSO_ADMIN_PASSWORD: admin
+      DB_SERVICE_PREFIX_MAPPING: sso-postgresql=DB
+      DB_JNDI: java:jboss/datasources/KeycloakDS
+      DB_DATABASE: keycloak
+      DB_USERNAME: keycloak
+      DB_PASSWORD: keycloak
+      SSO_POSTGRESQL_SERVICE_HOST: pg-rhsso
+      SSO_POSTGRESQL_SERVICE_PORT: "5432"
+      TX_DATABASE_PREFIX_MAPPING: sso-postgresql=DB
+    ports: ["8082:8080"]
+    depends_on:
+      pg-rhsso: {condition: service_healthy}
+
+  pg-auditor:
+    <<: *pg
+    environment:
+      <<: *pgenv
+      POSTGRES_DB: auditor
+    ports: ["5435:5432"]
+    volumes: [pg-auditor:/var/lib/postgresql/data]
+
+volumes:
+  pg-kc26: {}
+  pg-kc18: {}
+  pg-auditor: {}

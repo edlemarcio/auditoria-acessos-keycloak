@@ -1,0 +1,11 @@
+# segredos e chaves (nunca versionar)
+chaves.env
+chaves/
+*.pem
+.env
+# dados gerados e saídas
+dados/pessoas.json
+saida/
+logs/
+__pycache__/
+*.pyc
