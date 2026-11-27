@@ -19,7 +19,8 @@ DIA_MS = 86400_000
 
 def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str, fim: str,
           fuso: str = "America/Bahia", granularidade: str = "dia", instancias: list[str] | None = None,
-          varredura: bool = False, base_dias: int = 0, anterior: int | None = None) -> int:
+          varredura: bool = False, base_dias: int = 0, anterior: int | None = None, status: str = "na_fila",
+          solicitante_sub: str | None = None, origem: dict | None = None) -> int:
     if not justificativa or len(justificativa.strip()) < 5:
         raise ValueError("Justificativa obrigatória")
     dig = normalizar(tipo, valor)
@@ -48,6 +49,12 @@ def abrir(operador: str, justificativa: str, tipo: str, valor: str, inicio: str,
                                       cripto.aad(r["id"], "investigacao", "justificativa", r["id"])),
                     pub, cripto.cifrar_dek(dek, priv, cripto.aad(r["id"], "investigacao", "trilha_privada", r["id"])),
                     r["id"]))
+        if status != "na_fila" or solicitante_sub or origem:
+            cx.execute("UPDATE investigacao SET status=%s, solicitante_sub=%s, origem_externa=%s, origem_cifrada=%s "
+                       "WHERE id=%s", (status, solicitante_sub, bool(origem),
+                                       cripto.cifrar_dek(dek, json.dumps(origem, ensure_ascii=False),
+                                                         cripto.aad(r["id"], "investigacao", "origem", r["id"]))
+                                       if origem else None, r["id"]))
         trilha(cx, operador, "abrir_investigacao", r["id"], tipo=tipo, alvo=mascarar(tipo, dig),
                justificativa=justificativa, inicio=inicio, fim=fim)
         return r["id"]

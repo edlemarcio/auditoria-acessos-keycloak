@@ -120,10 +120,15 @@ def trilha(cx, operador: str, acao: str, investigacao_id: int | None = None, **d
         r = {"cadeia": cadeia, "seq": seq, "quando": datetime.now(timezone.utc), "operador": operador, "acao": acao,
              "investigacao_id": investigacao_id, "detalhe": detalhe, "livres_compromisso": comp,
              "hash_anterior": anterior}
+        h = hash_registro(r)
         cx.execute("INSERT INTO trilha_auditoria (quando, operador, acao, investigacao_id, detalhe, cadeia, seq, "
                    "hash_anterior, hash, livres_cifrado, livres_compromisso) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                    (r["quando"], operador, acao, investigacao_id, Jsonb(detalhe), cadeia, seq, anterior,
-                    hash_registro(r), cif, Jsonb(comp) if comp else None))
+                    h, cif, Jsonb(comp) if comp else None))
+    # cópia para o SIEM (§6.3): só ação, ator, horário, investigação e hashes; nada do detalhe nem texto livre
+    from . import siem
+    siem.enviar("trilha", ator=operador, investigacao=investigacao_id, registro=acao, cadeia=cadeia, seq=seq,
+                sha256=h)
 
 
 def verificar_cadeia(cx, cadeia: int | None = None) -> dict[int, list[str]]:

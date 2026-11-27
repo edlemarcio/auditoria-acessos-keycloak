@@ -100,10 +100,10 @@ def main():
     with conectar() as cx:
         checar(not verificar_cadeia(cx, inv)[inv], "3 cadeia íntegra de novo depois de desfeita a adulteração")
 
-    # ---- 4 âncora (hoje, para o teste: a cadeia nova só tem registros de hoje)
+    # ---- 4 âncora sob demanda (a cadeia nova só tem registros de hoje)
     with conectar() as cx:
         ancora.ancorar_pendentes(cx)
-        a = ancora.ancorar(cx, datetime.now(timezone.utc).date())
+        a = ancora.ancorar_agora(cx)
         folhas = [ancora.folha_cabeca(x) for x in a["cabecas"]]
         from auditor.merkle import raiz
         ok_p = all(ancora.verificar_prova(folhas[i], ancora.prova(folhas, i), a["raiz"]) for i in range(len(folhas)))

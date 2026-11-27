@@ -104,13 +104,16 @@ def fechar(inv_id: int) -> dict | None:
 
 
 # ------------------------------------------------------------------ jobs e worker
-def pegar_job(cx):
+def pegar_job(cx, tipos: tuple[str, ...] | None = None):
+    """`tipos`: o worker de pacotes só pega 'exportar'; o de coleta e tarefas, o resto (§8)."""
     with cx.transaction():
         return cx.execute("""
-            WITH c AS (SELECT id FROM job WHERE status='pendente' OR (status='executando' AND lease_ate < now())
+            WITH c AS (SELECT id FROM job WHERE (status='pendente' OR (status='executando' AND lease_ate < now()))
+                         AND (%s::text[] IS NULL OR tipo = ANY(%s::text[]))
                        ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
             UPDATE job j SET status='executando', tentativas=j.tentativas+1, lease_ate=now()+%s, atualizado=now()
-            FROM c WHERE j.id=c.id RETURNING j.*""", (LEASE_JOB,)).fetchone()
+            FROM c WHERE j.id=c.id RETURNING j.*""", (list(tipos) if tipos else None, list(tipos) if tipos else None,
+                                                      LEASE_JOB)).fetchone()
 
 
 def executar_job(cx, j: dict):
@@ -126,6 +129,9 @@ def executar_job(cx, j: dict):
             iniciar_coleta(j["investigacao_id"], "worker")
         elif j["tipo"] == "fechar":
             fechar(j["investigacao_id"])
+        elif j["tipo"] == "exportar":
+            from .casos import gerar_pacote_job
+            gerar_pacote_job(j["parametros"]["pacote"])
         else:
             raise ValueError(f"tipo de job desconhecido: {j['tipo']}")
         cx.execute("UPDATE job SET status='concluido', erro=NULL, atualizado=now() WHERE id=%s", (j["id"],))
@@ -136,9 +142,11 @@ def executar_job(cx, j: dict):
 
 
 def worker(threads: int = 4, ocioso_s: float | None = None, parar: threading.Event | None = None,
-           ao_fazer=None) -> int:
+           ao_fazer=None, papel: str = "todos") -> int:
     """Worker contínuo: jobs primeiro, depois tarefas de qualquer investigação em coleta (rodízio).
-    Com `ocioso_s`, encerra quando passar esse tempo sem trabalho (testes e execuções pontuais)."""
+    Com `ocioso_s`, encerra quando passar esse tempo sem trabalho (testes e execuções pontuais).
+    papel: todos (modo local) | coleta (jobs preparar/fechar e tarefas) | pacotes (só jobs exportar)."""
+    tipos = {"todos": None, "coleta": ("preparar", "fechar"), "pacotes": ("exportar",)}[papel]
     parar = parar or threading.Event()
     feitas = [0]
     lock = threading.Lock()
@@ -151,10 +159,12 @@ def worker(threads: int = 4, ocioso_s: float | None = None, parar: threading.Eve
         try:
             with conectar() as cx:
                 while not parar.is_set():
-                    j = pegar_job(cx)
+                    j = pegar_job(cx, tipos)
                     if j:
                         executar_job(cx, j)
                         o_que = f"job {j['tipo']} #{j['investigacao_id']}"
+                    elif papel == "pacotes":
+                        o_que = None
                     else:
                         t = coleta.pegar_tarefa(cx)
                         if t:

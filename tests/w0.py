@@ -40,13 +40,14 @@ def checar(ok: bool, nome: str, detalhe: str = ""):
 def exportar(inv: int, saida: Path, sem_mascara=False, dsn=DSN) -> Path:
     cmd = [sys.executable, "-m", "auditor", "exportar", "--id", str(inv), "--saida", str(saida),
            "--operador", "teste-w0"] + (["--sem-mascara"] if sem_mascara else [])
-    subprocess.run(cmd, check=True, cwd=RAIZ, env={**os.environ, "AUDITOR_DSN": dsn}, capture_output=True)
+    subprocess.run(cmd, check=True, cwd=RAIZ, env={**os.environ, "AUDITOR_DSN": dsn, "AUDITOR_MODO": "local"}, capture_output=True)
     return saida / f"investigacao_{inv}{'_sem_mascara' if sem_mascara else ''}.zip"
 
 
 def verificar(zp: Path) -> bool:
     r = subprocess.run([sys.executable, "-m", "auditor", "verificar", str(zp), "--chave-publica",
-                        str(RAIZ / "chaves/assinatura.pub.pem")], cwd=RAIZ, capture_output=True, text=True)
+                        str(RAIZ / "chaves/assinatura.pub.pem")], cwd=RAIZ, capture_output=True, text=True,
+                       env={**os.environ, "AUDITOR_MODO": "local"})
     return r.returncode == 0
 
 

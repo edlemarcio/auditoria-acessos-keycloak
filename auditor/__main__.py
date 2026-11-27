@@ -16,7 +16,10 @@
   python -m auditor ancorar [--ate AAAA-MM-DD]  âncora diária das cadeias da trilha (o worker faz sozinho)
   python -m auditor verificar-cadeia [--id N]   confere as cadeias da trilha e as âncoras
 
-Modo de chaves (AUDITOR_MODO): local (padrão, AUDITOR_CHAVE) ou vault (pelo chaveiro, por mTLS). No modo vault a
+  python -m auditor api [--porta 8000]          API e BFF (W1)
+
+AUDITOR_MODO é obrigatório: local (AUDITOR_CHAVE, só teste; recusa destino de produção), vault (serviços, chaves pelo
+chaveiro por mTLS) ou producao (a CLI vira cliente da API: auditor/cliente.py). No modo vault a
 identidade do processo é o certificado de chaves/servicos/: `worker` para o worker, `pacotes` para exportar e
 `operador` para o resto (AUDITOR_IDENTIDADE muda). Investigar e retomar passam a usar sempre a fila do worker.
 """
@@ -188,7 +191,8 @@ def cmd_worker(a):
     signal.signal(signal.SIGTERM, lambda *_: parar.set())
     signal.signal(signal.SIGINT, lambda *_: parar.set())
     print(f"worker com {a.threads} threads; Ctrl+C para parar", flush=True)
-    n = servicos.worker(a.threads, a.ocioso, parar, (lambda s: print(" ", s, flush=True)) if a.verboso else None)
+    n = servicos.worker(a.threads, a.ocioso, parar, (lambda s: print(" ", s, flush=True)) if a.verboso else None,
+                        a.papel)
     print(f"worker encerrado: {n} itens")
 
 
@@ -223,7 +227,7 @@ def cmd_verificar_cadeia(a):
         for cad, probs in sorted(verificar_cadeia(cx, a.id).items()):
             ok &= not probs
             print(f"[{'ok' if not probs else 'FALHA'}] cadeia {cad}" + "".join(f"\n    {p}" for p in probs[:10]))
-        for an in cx.execute("SELECT * FROM ancora ORDER BY dia"):
+        for an in cx.execute("SELECT * FROM ancora ORDER BY ate, id"):
             ok_a = raiz([folha_cabeca(c) for c in an["cabecas"]]) == an["raiz"] and verificar_carimbo(an["carimbo"],
                                                                                                     an["raiz"])
             for c in an["cabecas"]:   # a cabeça ancorada tem de existir na cadeia de hoje
@@ -232,9 +236,14 @@ def cmd_verificar_cadeia(a):
                 ok_a &= bool(r) and r["hash"] == c["hash"]
             ok &= ok_a
             if not ok_a or a.verboso:
-                print(f"[{'ok' if ok_a else 'FALHA'}] âncora {an['dia']} ({an['carimbo']['tipo']})")
+                print(f"[{'ok' if ok_a else 'FALHA'}] âncora {an['tipo']} {an['dia']} ({an['carimbo']['tipo']})")
     print("cadeias e âncoras íntegras" if ok else "FALHA na verificação")
     sys.exit(0 if ok else 1)
+
+
+def cmd_api(a):
+    from .api import servir
+    servir(a.porta)
 
 
 def cmd_chaveiro(a):
@@ -243,6 +252,14 @@ def cmd_chaveiro(a):
 
 
 def main():
+    from . import guarda
+    m = guarda.modo()                      # sem AUDITOR_MODO explícito, não inicia
+    if m == "producao":                    # cliente fino da API: sem banco, sem chave, sem certificado
+        guarda.exigir_cliente_limpo()
+        from .cliente import main as cliente
+        return cliente()
+    if m == "local":
+        guarda.exigir_local_seguro(instancias=guarda.instancias_cadastradas())
     ap = argparse.ArgumentParser(prog="auditor")
     sp = ap.add_subparsers(dest="cmd", required=True)
     p = sp.add_parser("chave"); p.add_argument("--destino", default="chaves"); p.set_defaults(f=cmd_chave)
@@ -278,7 +295,10 @@ def main():
     p.set_defaults(f=cmd_cancelar)
     p = sp.add_parser("worker"); p.add_argument("--threads", type=int, default=4)
     p.add_argument("--ocioso", type=float, help="encerra após N segundos sem trabalho")
-    p.add_argument("--verboso", action="store_true"); p.set_defaults(f=cmd_worker)
+    p.add_argument("--verboso", action="store_true")
+    p.add_argument("--papel", choices=["todos", "coleta", "pacotes"], default="todos",
+                   help="coleta: preparar, coletar e fechar; pacotes: só gerar pacotes (identidade própria)")
+    p.set_defaults(f=cmd_worker)
     p = sp.add_parser("exportar"); p.add_argument("--id", type=int, required=True)
     p.add_argument("--saida", default="saida"); p.add_argument("--operador", default="auditor")
     p.add_argument("--sem-mascara", action="store_true"); p.set_defaults(f=cmd_exportar)
@@ -288,11 +308,14 @@ def main():
     p = sp.add_parser("verificar-cadeia"); p.add_argument("--id", type=int); p.add_argument("--verboso",
                                                                                         action="store_true")
     p.set_defaults(f=cmd_verificar_cadeia)
+    p = sp.add_parser("api"); p.add_argument("--porta", type=int, default=8000); p.set_defaults(f=cmd_api)
     p = sp.add_parser("chaveiro"); p.add_argument("--porta", type=int, default=8443)
     p.add_argument("--certs", default="chaves/servicos"); p.set_defaults(f=cmd_chaveiro)
     a = ap.parse_args()
     # identidade mTLS do processo no modo vault (produção: cada host só tem o próprio certificado)
-    os.environ.setdefault("AUDITOR_IDENTIDADE", {"worker": "worker", "exportar": "pacotes"}.get(a.cmd, "operador"))
+    os.environ.setdefault("AUDITOR_IDENTIDADE", {"worker": "pacotes" if getattr(a, "papel", "") == "pacotes"
+                                                 else "worker", "exportar": "pacotes", "api": "api"}.get(a.cmd,
+                                                                                                 "operador"))
     a.f(a)
 
 

@@ -12,7 +12,9 @@ Identidades (CN do certificado, emitido pelo Vault PKI):
   worker    coleta (investigação em 'coletando'), preparar e fechar (job do tipo em execução)
   pacotes   exportar (investigação concluída ou parcial)
   operador  criar as DEKs de uma investigação em abertura; HMAC do alvo; segredos (cadastro e sondas)
-  api       recusado até a W1, que exige o token OIDC do usuário designado
+  api       só com o access token OIDC do usuário (cabeçalho X-Token-Usuario, audiência kc-auditor-chaveiro, MFA):
+            consulta = usuário designado na investigação; decisao = aprovador, pedido aguardando, não é o
+            solicitante; criar e HMAC do alvo = solicitante ou investigador; segredos = administrador técnico
 """
 from __future__ import annotations
 
@@ -95,7 +97,35 @@ class Chaveiro:
             raise Negado("inexistente", f"investigação {inv_id} inexistente")
         return r["status"]
 
-    def _autorizar(self, cx, cn: str, inv_id: int, finalidade: str):
+    @staticmethod
+    def _usuario(token: str | None) -> dict:
+        from . import oidc
+        if not token:
+            raise Negado("exige_oidc", "a API recebe chaves só em nome de um usuário autenticado (token OIDC)")
+        try:
+            return oidc.validar(token, audiencia="kc-auditor-chaveiro")
+        except oidc.TokenInvalido as e:
+            raise Negado("token_invalido", f"token do usuário recusado: {e}") from e
+
+    def _autorizar_api(self, cx, token, inv_id: int, finalidade: str):
+        from .oidc import papeis
+        u = self._usuario(token)
+        st = self._estado(cx, inv_id)
+        i = cx.execute("SELECT solicitante_sub FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
+        if finalidade == "consulta":
+            if not cx.execute("SELECT 1 FROM designacao WHERE investigacao_id=%s AND sub=%s", (inv_id, u["sub"])
+                              ).fetchone():
+                raise Negado("sem_designacao", f"usuário sem designação na investigação {inv_id}")
+        elif finalidade == "decisao":
+            if "aprovador" not in papeis(u) or st != "aguardando_aprovacao" or i["solicitante_sub"] == u["sub"]:
+                raise Negado("fora_de_decisao", f"decisão recusada: investigação {inv_id} está '{st}'")
+        else:
+            raise Negado("finalidade_nao_permitida", f"'api' não recebe DEK para '{finalidade}'")
+        return u
+
+    def _autorizar(self, cx, cn: str, inv_id: int, finalidade: str, token: str | None = None):
+        if cn == "api":
+            return self._autorizar_api(cx, token, inv_id, finalidade)
         st = self._estado(cx, inv_id)
 
         def job_ativo(tipo):
@@ -105,10 +135,11 @@ class Chaveiro:
             ("worker", "coleta"): (lambda: st == "coletando", "fora_de_coleta"),
             ("worker", "preparar"): (lambda: job_ativo("preparar"), "sem_job_preparar"),
             ("worker", "fechar"): (lambda: job_ativo("fechar"), "sem_job_fechar"),
-            ("pacotes", "exportar"): (lambda: st in EXPORTAVEIS, "nao_exportavel"),
+            # só investigação com pacote pedido (§5.3)
+            ("pacotes", "exportar"): (lambda: st in EXPORTAVEIS and cx.execute(
+                "SELECT 1 FROM pacote WHERE investigacao_id=%s AND status='gerando'", (inv_id,)).fetchone()
+                is not None, "sem_pacote_pedido"),
         }
-        if cn == "api":
-            raise Negado("exige_oidc", "a API recebe DEKs só com o token OIDC do usuário designado (W1)")
         regra = regras.get((cn, finalidade))
         if not regra:
             raise Negado("finalidade_nao_permitida", f"'{cn}' não recebe DEK para '{finalidade}'")
@@ -116,9 +147,13 @@ class Chaveiro:
             raise Negado(regra[1], f"'{finalidade}' recusada: investigação {inv_id} está '{st}'")
 
     # ---------------------------------------------------------------- operações
-    def criar(self, cn: str, inv_id: int) -> dict:
+    def criar(self, cn: str, inv_id: int, token: str | None = None) -> dict:
         if cn not in ("operador", "api"):
             raise Negado("finalidade_nao_permitida", f"'{cn}' não cria investigações")
+        if cn == "api":
+            from .oidc import papeis
+            if not papeis(self._usuario(token)) & {"solicitante", "investigador"}:
+                raise Negado("perfil", "só solicitante ou investigador (pedido externo) abre investigação")
         with self.pool.connection() as cx:
             if self._estado(cx, inv_id) != "abrindo":
                 raise Negado("fora_de_abertura", f"investigação {inv_id} não está em abertura")
@@ -137,9 +172,9 @@ class Chaveiro:
         self._registrar(cn, "criar_dek", inv_id, True, finalidade="abrir", classe="principal")
         return {"dek": principal}
 
-    def entregar(self, cn: str, inv_id: int, finalidade: str, classe: str) -> dict:
+    def entregar(self, cn: str, inv_id: int, finalidade: str, classe: str, token: str | None = None) -> dict:
         with self.pool.connection() as cx:
-            self._autorizar(cx, cn, inv_id, finalidade)
+            u = self._autorizar(cx, cn, inv_id, finalidade, token)
             r = cx.execute("SELECT envelope FROM chave_investigacao WHERE investigacao_id=%s AND classe=%s AND "
                            "destruida_em IS NULL", (inv_id, classe)).fetchone()
         if not r:
@@ -148,27 +183,39 @@ class Chaveiro:
         if not env.startswith("vault:"):
             raise Negado("chave_local", f"DEK da investigação {inv_id} envolvida no modo local")
         d = self._v(f"transit/decrypt/{KEK}", ciphertext=env, context=self._ctx(inv_id, classe))
-        self._registrar(cn, "entregar_dek", inv_id, True, finalidade=finalidade, classe=classe)
+        self._registrar(cn, "entregar_dek", inv_id, True, finalidade=finalidade, classe=classe,
+                        usuario=(u or {}).get("sub") if cn == "api" else None)
         return {"dek": d["plaintext"]}
 
-    def hmac_alvo(self, cn: str, tipo: str, digitos: str) -> dict:
+    def _admin_ou(self, cn, token, permitidos) -> None:
+        if cn in permitidos:
+            return
+        if cn == "api":
+            from .oidc import papeis
+            if "admin_tecnico" in papeis(self._usuario(token)):
+                return
+        raise Negado("finalidade_nao_permitida", f"'{cn}' não usa os segredos das instâncias")
+
+    def hmac_alvo(self, cn: str, tipo: str, digitos: str, token: str | None = None) -> dict:
         if cn not in ("operador", "api"):
             raise Negado("finalidade_nao_permitida", f"'{cn}' não calcula HMAC do alvo")
+        if cn == "api":
+            from .oidc import papeis
+            if not papeis(self._usuario(token)) & {"solicitante", "investigador"}:
+                raise Negado("perfil", "só solicitante ou investigador calcula o HMAC do alvo")
         d = self._v("transit/hmac/kc-auditor-alvo/sha2-256", input=_b64(f"{tipo}:{digitos}".encode()))
         siem.enviar("hmac_alvo", servico=cn)
         return {"hmac": d["hmac"]}
 
-    def cifrar_segredo(self, cn: str, instancia: str, segredo: str) -> dict:
-        if cn != "operador":
-            raise Negado("finalidade_nao_permitida", f"'{cn}' não cadastra instâncias")
+    def cifrar_segredo(self, cn: str, instancia: str, segredo: str, token: str | None = None) -> dict:
+        self._admin_ou(cn, token, ("operador",))
         d = self._v("transit/encrypt/kc-auditor-segredos", plaintext=_b64(segredo.encode()),
                     context=_b64(f"instancia|{instancia}".encode()))
         siem.enviar("cifrar_segredo", servico=cn, instancia=instancia)
         return {"cifrado": d["ciphertext"]}
 
-    def segredo(self, cn: str, instancia_id: int, finalidade: str) -> dict:
-        if cn not in ("worker", "operador"):
-            raise Negado("finalidade_nao_permitida", f"'{cn}' não fala com os Keycloaks auditados")
+    def segredo(self, cn: str, instancia_id: int, finalidade: str, token: str | None = None) -> dict:
+        self._admin_ou(cn, token, ("worker", "operador"))
         with self.pool.connection() as cx:
             i = cx.execute("SELECT nome, segredo_cifrado FROM instancia WHERE id=%s", (instancia_id,)).fetchone()
         if not i:
@@ -244,13 +291,14 @@ def servir(porta: int = 8443, certs: Path = Path("chaves/servicos")):
                 return self._responder(403, {"motivo": "certificado sem identidade de serviço"})
             try:
                 c = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                tok = self.headers.get("X-Token-Usuario")
                 rotas = {
-                    "/v1/dek/criar": lambda: ch.criar(cn, int(c["investigacao"])),
+                    "/v1/dek/criar": lambda: ch.criar(cn, int(c["investigacao"]), tok),
                     "/v1/dek": lambda: ch.entregar(cn, int(c["investigacao"]), c["finalidade"],
-                                                   c.get("classe", "principal")),
-                    "/v1/hmac/alvo": lambda: ch.hmac_alvo(cn, c["tipo"], c["digitos"]),
-                    "/v1/segredo/cifrar": lambda: ch.cifrar_segredo(cn, c["instancia"], c["segredo"]),
-                    "/v1/segredo": lambda: ch.segredo(cn, int(c["instancia_id"]), c.get("finalidade", "")),
+                                                   c.get("classe", "principal"), tok),
+                    "/v1/hmac/alvo": lambda: ch.hmac_alvo(cn, c["tipo"], c["digitos"], tok),
+                    "/v1/segredo/cifrar": lambda: ch.cifrar_segredo(cn, c["instancia"], c["segredo"], tok),
+                    "/v1/segredo": lambda: ch.segredo(cn, int(c["instancia_id"]), c.get("finalidade", ""), tok),
                     **{f"/v1/historico/{op}": (lambda op=op: ch.historico(
                         cn, op, int(c["investigacao"]), int(c["instancia_id"]), c["realm"],
                         **{k: c[k] for k in ("valor", "texto", "cifrado") if k in c}))

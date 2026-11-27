@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PERMITIDOS = {"acao", "ator", "investigacao", "finalidade", "classe", "servico", "severidade", "motivo_codigo",
-              "instancia", "quantidade", "janela_s", "sha256"}
+              "instancia", "quantidade", "janela_s", "sha256", "registro", "cadeia", "seq", "porta"}
 _lock = threading.Lock()
 _syslog: logging.Logger | None = None
 

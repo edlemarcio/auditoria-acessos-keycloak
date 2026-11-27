@@ -79,7 +79,8 @@ def _aba(wb, nome, cab, linhas, larguras=None, aviso=None, fmt_data=(), num=()):
     return wb
 
 
-def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False) -> dict:
+def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False, soltos: bool = True) -> dict:
+    """`soltos=False` (worker de pacotes): só o zip, nada de XLSX e HTML soltos em disco (§6.4)."""
     with conectar() as cx:
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
     dig = alvo_de(inv, "exportar")
@@ -227,11 +228,15 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
     from .db import registro_trilha
     import rfc8785
     with conectar() as cx:
+        if not soltos:   # pacote do worker: âncora sob demanda, para o pacote já sair com a prova de hoje
+            from .ancora import ancorar_agora
+            ancorar_agora(cx)
         tr = cx.execute("SELECT * FROM trilha_auditoria WHERE cadeia=%s ORDER BY seq", (inv_id,)).fetchall()
         provas = provas_da_cadeia(cx, inv_id)
     arquivos["trilha.jsonl"] = b"".join(rfc8785.dumps({**registro_trilha(r), "hash": r["hash"]}) + b"\n" for r in tr)
     for pr in provas:
-        arquivos[f"ancoras/{pr['dia']}.json"] = json.dumps(pr, ensure_ascii=False, indent=1).encode()
+        arquivos[f"ancoras/{pr['ate'][:19].replace(':', '')}.json"] = json.dumps(pr, ensure_ascii=False,
+                                                                                 indent=1).encode()
     contas_por_id = {c["id"]: c for c in d["contas"]}
     arquivos["fatias.json"] = json.dumps(
         [{**{k: v for k, v in f.items() if k not in ("conta_id", "instancia_id")},
@@ -269,7 +274,7 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
                               **({"user_id": c["user_id"]} if sem_mascara else {})} for c in excluidas],
         "cobertura": {"realms": list(fr["realms"]), "tempo": list(fr["tempo"])},
         "trilha": {"entradas": len(tr), "cabeca": {"seq": tr[-1]["seq"], "hash": tr[-1]["hash"]} if tr else None,
-                   "ancoras": [p["dia"] for p in provas],
+                   "ancoras": [{"dia": p["dia"], "tipo": p["tipo"]} for p in provas],
                    "formato": "registro = RFC 8785 dos campos estruturados + compromissos dos campos livres + hash "
                               "anterior; folha da âncora = SHA-256(0x00 ‖ RFC 8785({cadeia, seq, hash}))"},
         "custodia": {"raiz_merkle": cust["raiz"], "fatias_seladas": len(cust["fatias"]),
@@ -289,7 +294,7 @@ def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False)
             z.writestr(n, b)
         z.writestr("manifesto.json", corpo)
         z.writestr("manifesto.sig", sig)
-    for n, b in arquivos.items():
+    for n, b in arquivos.items() if soltos else ():
         if n.endswith((".xlsx", ".html")):
             # arquivos soltos: o sufixo evita que uma exportação sem máscara sobrescreva a mascarada
             base, ext = n.rsplit(".", 1)

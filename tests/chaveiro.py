@@ -166,6 +166,11 @@ def main(dias: int = 10):
                f"status={st} {w.stderr.strip()[-300:]}")
         checar({e["f"] for e in entregas} >= {"preparar", "coleta"}, "5 DEKs entregues ao worker por finalidade",
                str({e["f"]: e["n"] for e in entregas}))
+        como("pacotes")
+        ok, msg = recusado(lambda: chaves.dek(inv, "exportar"))
+        checar(ok, "3 pacotes sem pacote pedido é recusado, mesmo com a investigação concluída", msg)
+        with conectar() as cx:   # o pedido de pacote (na W1, feito pela API)
+            cx.execute("INSERT INTO pacote (investigacao_id, sem_mascara, pedido_por) VALUES (%s,false,'teste')", (inv,))
         r = subprocess.run([sys.executable, "tests/contagem_real.py", str(inv)], cwd=RAIZ, capture_output=True,
                            text=True, env={**os.environ, "AUDITOR_IDENTIDADE": "pacotes"})
         checar(r.returncode == 0, "5 contagem id a id", r.stdout.strip().replace("\n", " | ")[-300:])

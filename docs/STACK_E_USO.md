@@ -341,6 +341,97 @@ AUDITOR_DSN=<kc_auditor_app> AUDITOR_DSN_DONO=<dono> KC_DSN_kc26=... KC_DSN_kc18
 | Papel `kc_coleta` separado | A aplicação usa um papel só. `selo`, `ancora` e trilha aceitam só inserção (trigger e permissões) |
 | Pedidos ao `chaveiro` | Com o cache de 5 min, uma investigação gera poucos pedidos (no teste: 1 por finalidade e processo). A medição sob carga fica para o teste de carga da W6 |
 
+## Acesso: realm dedicado, API e CLI de produção (etapa W1)
+
+**Modo obrigatório.** Desde a W1 a CLI não inicia sem `AUDITOR_MODO` explícito. Os valores são `local`
+(desenvolvimento e teste, como antes), `vault` (serviços: API, workers, chaveiro) e `producao` (CLI cliente da API).
+No modo local, ela recusa iniciar se o banco ou alguma instância cadastrada estiver na lista de destinos de produção
+(`AUDITOR_DESTINOS_PRODUCAO` ou `/etc/kc-auditor/destinos-producao`), ou num host com `AUDITOR_AMBIENTE=producao`.
+A recusa vai para o SIEM. Nos exemplos anteriores deste guia, acrescente `export AUDITOR_MODO=local`.
+
+**Realm dedicado.** O `infra/realm_auditor.py` cria o realm `auditor` no Keycloak 26 da stack com:
+- MFA obrigatório por nível de autenticação: nível 1 é a senha e nível 2 é o OTP, com `acr=mfa`. O nível 2 vale
+  5 min, o que dá o step-up;
+- os seis perfis: solicitante, investigador, aprovador, auditor interno, administrador técnico e gestor de acesso;
+- o cliente do BFF (código + PKCE) e o da CLI (device flow com PKCE), os dois com audiência para a API e o chaveiro;
+- usuários de teste de cada perfil, mais o operador do Vault (sem perfil) e um usuário com papéis conflitantes.
+
+A senha é `senha-<usuario>`, e o OTP é configurado no primeiro login.
+
+```bash
+python infra/realm_auditor.py
+export AUDITOR_OIDC_EMISSOR=http://localhost:8090/realms/auditor
+AUDITOR_MODO=local AUDITOR_COOKIE_SEGURO=0 python -m auditor api &      # http://localhost:8000 (docs em /api/docs)
+AUDITOR_MODO=local python -m auditor worker &
+```
+
+Na web, `http://localhost:8000/auth/entrar` faz o login e cria a sessão do BFF. O cookie é `HttpOnly` e
+`SameSite=Strict`, a sessão cai com 30 min sem atividade e dura no máximo 8 h, e os tokens ficam cifrados com uma
+chave que só o cookie tem. Requisições que mudam estado exigem o cabeçalho `X-Requisicao: kc-auditor`.
+`AUDITOR_COOKIE_SEGURO=0` só serve para testar em http.
+
+**O que cada perfil faz** (a regra fica em `auditor/casos.py`, e a API e a CLI passam por ela):
+
+| Perfil | Pode |
+| --- | --- |
+| Solicitante | Pedir, acompanhar, reenviar o pedido devolvido, cancelar o próprio pedido |
+| Aprovador | Aprovar (designa o investigador), devolver, recusar, aprovar o pacote sem máscara. Nunca decide o que ele mesmo pediu, nem se designa |
+| Investigador | Registrar pedido externo (ofício, com órgão, documento e fundamento). Na investigação em que foi designado: iniciar, pausar, retomar, cancelar, gerar pacote e baixar |
+| Auditor interno | Ler a trilha e os metadados de todas as investigações (sem o alvo mascarado) e verificar as cadeias |
+| Administrador técnico | Instâncias, sondas, orçamento de carga, saúde dos serviços |
+| Gestor de acesso | Ver quem tem qual perfil (a concessão é feita no realm) |
+| Operador do Vault | Nenhum acesso ao auditor |
+
+O pacote sem máscara passa por quatro olhos: o investigador pede, informando o destino formal, e outro aprovador
+aprova. O pacote é gerado pelo worker de pacotes, sem arquivos soltos, e já sai com uma âncora sob demanda. O sem
+máscara expira em 24 h. O download usa um link de uso único, válido por 10 min e só para quem pediu, e cada download
+registra o SHA-256. Ações sensíveis (aprovar, pedir sem máscara, baixar sem máscara, cadastrar instância, ajustar
+orçamento) exigem MFA nos últimos 5 min.
+
+**CLI de produção.** Com `AUDITOR_MODO=producao`, a CLI é só cliente da API. Ela não aceita banco, chave nem
+certificado no ambiente, e os comandos de servidor não existem nela:
+
+```bash
+export AUDITOR_MODO=producao AUDITOR_API=http://localhost:8000 AUDITOR_OIDC_EMISSOR=http://localhost:8090/realms/auditor
+python -m auditor login                       # endereço e código; aprove no navegador, com MFA
+python -m auditor pedir --cpf ... --de ... --ate ... --justificativa "..."
+python -m auditor aprovar --id 3 --investigador investigador1 --motivo "..."
+python -m auditor iniciar --id 3
+python -m auditor exportar --id 3 --saida d/  # pede, espera o worker e baixa
+```
+
+**No modo vault,** a API usa o certificado `api` e repassa ao chaveiro o token do usuário. O chaveiro confere a
+assinatura, o MFA e a designação antes de entregar a chave (`consulta` para quem foi designado, `decisao` para o
+aprovador de um pedido pendente que não é dele). Os workers rodam separados (`worker --papel coleta` e
+`worker --papel pacotes`). O worker de pacotes só recebe chave de investigação com pacote pedido.
+
+**Trilha no SIEM.** Cada registro da trilha é copiado para o SIEM, só com ação, ator, investigação, posição na
+cadeia e hash.
+
+**Teste de aceite da W1.** Ele sobe a API e os workers, e faz login de todos os perfis pela web e pela CLI. Leva
+cerca de 7 min, porque inclui esperar 5 min para testar o step-up:
+
+```bash
+AUDITOR_DSN=<kc_auditor_app> KC_DSN_kc26=... KC_DSN_kc18=... python tests/acesso.py              # modo local
+AUDITOR_MODO=vault AUDITOR_DSN=<app>/auditor_w0b CHAVEIRO_DSN=<kc_chaveiro>/auditor_w0b ... python tests/acesso.py
+```
+
+O teste cobre:
+- a matriz de permissões pelas duas portas;
+- segregação e quatro olhos;
+- papéis conflitantes recusados no login;
+- step-up;
+- nenhuma rota sem autorização, e POST sem o cabeçalho anti-CSRF recusado;
+- a CLI de produção sem credenciais;
+- o modo local recusado contra destino de produção;
+- a trilha no SIEM sem texto livre.
+
+**Ficou para depois:**
+- RLS no banco por designação. A W1 não lê eventos pela API; isso entra com as telas de dados (W3).
+- Escalonamento ao substituto, recertificação semestral, alerta automático de mudança de papel no realm
+  (`casos.alerta_papel` já existe; falta o vigia dos eventos administrativos), documento de origem anexado e telas
+  (W2).
+
 ## Acessos da stack de teste
 
 | O quê | Endereço | Usuário | Senha |

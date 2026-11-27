@@ -46,6 +46,24 @@ def modo() -> str:
     return m
 
 
+# ------------------------------------------------------------------ usuário em nome de quem a API pede (W1)
+import contextlib
+import contextvars
+
+_token_usuario: contextvars.ContextVar[str | None] = contextvars.ContextVar("token_usuario", default=None)
+
+
+@contextlib.contextmanager
+def como_usuario(token: str | None):
+    """A API repassa ao chaveiro o access token do usuário (audiência kc-auditor-chaveiro): o chaveiro confere a
+    assinatura, o MFA e a designação antes de entregar a DEK (§5.3)."""
+    t = _token_usuario.set(token)
+    try:
+        yield
+    finally:
+        _token_usuario.reset(t)
+
+
 # ------------------------------------------------------------------ cliente do chaveiro (mTLS)
 _cli = None
 _cli_lock = threading.Lock()
@@ -75,7 +93,8 @@ def _chaveiro():
 def pedir(caminho: str, **corpo) -> dict:
     import httpx
     try:
-        r = _chaveiro().post(caminho, json=corpo)
+        tok = _token_usuario.get()
+        r = _chaveiro().post(caminho, json=corpo, headers={"X-Token-Usuario": tok} if tok else None)
     except httpx.TransportError as e:
         raise ChaveiroIndisponivel(f"chaveiro indisponível: {type(e).__name__}") from e
     if r.status_code == 403:
@@ -103,12 +122,14 @@ def criar_deks(cx, inv_id: int) -> bytes:
                        "VALUES (%s,%s,%s,'local')", (inv_id, c, cripto.envolver_local(k, inv_id, c)))
         dek = deks["principal"]
     with _cache_lock:
-        _cache[(inv_id, "principal", "abrir")] = (dek, time.monotonic() + TTL_DEK_S)
+        _cache[(inv_id, "principal", "abrir", None)] = (dek, time.monotonic() + TTL_DEK_S)
     return dek
 
 
 def dek(inv_id: int, finalidade: str, classe: str = "principal") -> bytes:
-    k = (inv_id, classe, finalidade)
+    # em nome de um usuário, o cache é por usuário: a DEK que um recebeu não serve a outro sem passar pelo chaveiro
+    k = (inv_id, classe, finalidade, _token_usuario.get() and __import__("hashlib").sha256(
+        _token_usuario.get().encode()).hexdigest())
     agora = time.monotonic()
     with _cache_lock:
         v = _cache.get(k)

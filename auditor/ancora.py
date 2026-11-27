@@ -86,20 +86,31 @@ def verificar_carimbo(c: dict, raiz: str) -> bool:
 # ------------------------------------------------------------------ âncoras
 def ancorar(cx, dia: date) -> dict | None:
     """Ancora o dia (idempotente). Devolve a âncora, ou None se não havia trilha até o fim do dia."""
-    ja = cx.execute("SELECT * FROM ancora WHERE dia=%s", (dia,)).fetchone()
+    ja = cx.execute("SELECT * FROM ancora WHERE dia=%s AND tipo='diaria'", (dia,)).fetchone()
     if ja:
         return ja
-    fim = datetime.combine(dia + timedelta(days=1), time(), timezone.utc)
+    return _ancorar(cx, dia, datetime.combine(dia + timedelta(days=1), time(), timezone.utc), "diaria")
+
+
+def ancorar_agora(cx) -> dict | None:
+    """Âncora sob demanda (antes de gerar um pacote): as cabeças de agora, com carimbo. Não substitui a diária."""
+    agora = datetime.now(timezone.utc)
+    return _ancorar(cx, agora.date(), agora, "sob_demanda")
+
+
+def _ancorar(cx, dia: date, fim: datetime, tipo: str) -> dict | None:
     cabecas = cx.execute("SELECT DISTINCT ON (cadeia) cadeia, seq, hash FROM trilha_auditoria WHERE cadeia IS NOT NULL "
                          "AND hash IS NOT NULL AND quando < %s ORDER BY cadeia, seq DESC", (fim,)).fetchall()
     if not cabecas:
         return None
     raiz = merkle.raiz([folha_cabeca(c) for c in cabecas])
     car = carimbar(raiz)
-    cx.execute("INSERT INTO ancora (dia, raiz, cabecas, carimbo) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-               (dia, raiz, Jsonb([dict(c) for c in cabecas]), Jsonb(car)))
-    trilha(cx, "ancora", "ancorar_dia", None, dia=dia.isoformat(), raiz=raiz, cadeias=len(cabecas))
-    return cx.execute("SELECT * FROM ancora WHERE dia=%s", (dia,)).fetchone()
+    r = cx.execute("INSERT INTO ancora (dia, raiz, cabecas, carimbo, tipo, ate) VALUES (%s,%s,%s,%s,%s,%s) "
+                   "ON CONFLICT DO NOTHING RETURNING *", (dia, raiz, Jsonb([dict(c) for c in cabecas]), Jsonb(car),
+                                                         tipo, fim)).fetchone()
+    trilha(cx, "ancora", "ancorar_dia" if tipo == "diaria" else "ancorar_sob_demanda", None, dia=dia.isoformat(),
+           raiz=raiz, cadeias=len(cabecas))
+    return r or cx.execute("SELECT * FROM ancora WHERE dia=%s AND tipo=%s", (dia, tipo)).fetchone()
 
 
 def ancorar_pendentes(cx, ate: date | None = None) -> list[date]:
@@ -109,7 +120,7 @@ def ancorar_pendentes(cx, ate: date | None = None) -> list[date]:
     if not p:
         return []
     feitos, d = [], p.astimezone(timezone.utc).date()
-    ja = {r["dia"] for r in cx.execute("SELECT dia FROM ancora")}
+    ja = {r["dia"] for r in cx.execute("SELECT dia FROM ancora WHERE tipo='diaria'")}
     while d <= ate:
         if d not in ja and ancorar(cx, d):
             feitos.append(d)
@@ -120,13 +131,13 @@ def ancorar_pendentes(cx, ate: date | None = None) -> list[date]:
 def provas_da_cadeia(cx, cadeia: int) -> list[dict]:
     """Para cada dia ancorado em que a cadeia tem cabeça: a cabeça, a prova de inclusão e o carimbo."""
     out = []
-    for a in cx.execute("SELECT * FROM ancora ORDER BY dia"):
+    for a in cx.execute("SELECT * FROM ancora ORDER BY ate, id"):
         cabs = a["cabecas"]
         idx = next((i for i, c in enumerate(cabs) if c["cadeia"] == cadeia), None)
         if idx is None:
             continue
         folhas = [folha_cabeca(c) for c in cabs]
-        out.append({"dia": a["dia"].isoformat(), "raiz": a["raiz"], "cabeca": cabs[idx], "folha": folhas[idx],
+        out.append({"dia": a["dia"].isoformat(), "tipo": a["tipo"], "ate": a["ate"].isoformat(), "raiz": a["raiz"], "cabeca": cabs[idx], "folha": folhas[idx],
                     "prova": prova(folhas, idx), "carimbo": a["carimbo"]})
     # dias consecutivos com a mesma cabeça provam a mesma coisa; fica o primeiro (data mais antiga)
     vistos, unicos = set(), []
