@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, NavLink, useLocation, useParams } from 'react-router'
 import { ErroApi } from '../api/cliente'
 import { detalhe, linkPacote, pacotes as buscarPacotes, trilhaGlobal, urlDocumento, verificarCadeia } from '../api/rotas'
@@ -21,6 +21,13 @@ export function Investigacao({ aba }: { aba: Aba }) {
   const local = useLocation()
   const avisoNav = (local.state as { aviso?: string } | null)?.aviso
   const { dados: d, erro, carregando, recarregar } = useCarregar((s) => detalhe(id, s), [id])
+  // estados de passagem (na fila, preparando, fechando) não têm acompanhamento ao vivo: consulta o detalhe a cada 3 s
+  const passagem = d ? Boolean(indicador(d.status).preparando) : false
+  useEffect(() => {
+    if (!passagem) return
+    const t = setInterval(recarregar, 3000)
+    return () => clearInterval(t)
+  }, [passagem, recarregar])
   const nomeAba = { resumo: 'Resumo', pacotes: 'Pacotes', trilha: 'Trilha' }[aba]
   usePagina(`Investigação ${id} · ${nomeAba}`, [{ rotulo: 'Investigações', rota: '/investigacoes' },
     { rotulo: `nº ${id}`, rota: `/investigacoes/${id}` }, { rotulo: nomeAba }])
@@ -82,7 +89,8 @@ function Resumo({ d, recarregar }: { d: Detalhe; recarregar: () => void }) {
     {d.status === 'preservacao_urgente' && <Mensagem tipo="info" titulo="Coleta lacrada.">Os eventos estão sendo coletados e cifrados, mas nenhuma tela de
       dados abre até a aprovação do pedido completo.{d.preservacao && <> Escalona ao coordenador em {dataHora(d.preservacao.escalona_em, d.fuso ?? undefined)};
       sem decisão, os dados são destruídos em {dataHora(d.preservacao.destroi_em, d.fuso ?? undefined)}{d.preservacao.prorrogada ? ' (prazo já prorrogado)' : ''}.</>}</Mensagem>}
-    {emColeta(d.status) && d.status !== 'preservacao_urgente' && !indicador(d.status).preparando && <Acompanhamento id={d.id} fuso={d.fuso ?? undefined} />}
+    {emColeta(d.status) && d.status !== 'preservacao_urgente' && !indicador(d.status).preparando && <Acompanhamento id={d.id} fuso={d.fuso ?? undefined}
+      aoMudarStatus={(s) => { if (s !== d.status) recarregar() }} />}
     {indicador(d.status).preparando && <Mensagem tipo="info" papel="status">Preparando a coleta… as tarefas aparecem aqui em instantes.</Mensagem>}
 
     <div className="grade-resumo">

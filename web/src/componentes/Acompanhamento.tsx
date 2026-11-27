@@ -1,10 +1,16 @@
+import { useEffect, useRef } from 'react'
 import { useAoVivo } from '../api/aoVivo'
 import { dataHora, numero } from '../dominio/formato'
 import { Esqueleto, Icone, Mensagem } from './Estado'
 
 /** Acompanhamento ao vivo (§7.3, §7.12): tarefas por instância, req/s contra o orçamento, falhas, término. */
-export function Acompanhamento({ id, fuso }: { id: number; fuso?: string }) {
+export function Acompanhamento({ id, fuso, aoMudarStatus }: { id: number; fuso?: string; aoMudarStatus?: (status: string) => void }) {
   const { dados, conexao, anuncio } = useAoVivo(id, true)
+  const status = dados?.status
+  // o estado mudou no servidor (concluída, falhou, pausada por outra pessoa): a tela recarrega o detalhe e as ações
+  const aviso = useRef(aoMudarStatus)
+  aviso.current = aoMudarStatus
+  useEffect(() => { if (status) aviso.current?.(status) }, [status])
   const parado = conexao === 'reconectando'
   return (
     <section className="br-card acompanhamento" aria-labelledby="t-acomp" data-conexao={conexao}>

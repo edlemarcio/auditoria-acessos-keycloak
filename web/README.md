@@ -50,6 +50,7 @@ montado a partir da lista; o resto mostra o erro da tela.
 | --- | --- |
 | `npm test` | Vitest + Testing Library (jsdom, MSW em Node): CPF/título (DV e máscara), assistente, ações, lista, cliente da API, SSE, armazenamento |
 | `npm run e2e` | Playwright contra o `vite dev` com dublês: **axe-core** (WCAG 2.0/2.1/2.2 A/AA + boas práticas) em todas as telas, nos temas claro e escuro, e jornadas só com teclado |
+| `npm run e2e:aceite` | **Aceite do W2**: investigação de 180 dias do pedido à conclusão só pela web, com login real de solicitante1, aprovador1 e investigador1, contra a API integrada em :8000 servindo `web/dist` (com worker). ~12 min |
 | `npm run e2e:real` | Playwright ponta a ponta **real**: login no Keycloak :8090 (senha + OTP de `chaves/totp_teste.json`) até o Início e a lista. Precisa da API em :8100 (acima) e da porta 5173 livre |
 | `npm run e2e:build` | `npm run build` e o build servido com a CSP da API (`default-src 'self'`): sem violação, sem dublês, fontes e ícones locais |
 | `npm run capturas` | Gera as capturas de `docs/capturas/w2/` (só dados dos dublês) |

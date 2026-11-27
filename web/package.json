@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "e2e": "playwright test",
+    "e2e:aceite": "playwright test -c playwright.aceite.config.ts",
     "e2e:real": "playwright test -c playwright.real.config.ts",
     "capturas": "CAPTURAS=1 playwright test capturas",
     "e2e:build": "npm run build && playwright test -c playwright.build.config.ts"
