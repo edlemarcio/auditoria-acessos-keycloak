@@ -137,6 +137,8 @@ python -m auditor init          # com AUDITOR_CHAVE carregada: converte segredos
 ```
 
 O `init` é idempotente. Na primeira vez, mostra o que converteu (`instancias`, `investigacoes`, `historico`).
+Desde a W0a, o esquema é versionado com Alembic (`auditor/migracoes/`): o `init` aplica as migrações pendentes
+(`upgrade head`). Bases criadas antes ficam marcadas na revisão `0001` sem nenhuma mudança de estrutura.
 
 **Papel de banco da aplicação.** Depois do `init` com o papel dono, crie o papel sem DDL e sem permissão de alterar
 a trilha, e use-o no dia a dia:
