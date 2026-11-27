@@ -1,6 +1,6 @@
 """Realm dedicado aos usuários do auditor (W1, PROPOSTA_WEB §4.1 e §8.9), no Keycloak 26 da stack. Idempotente.
 
-  python infra/realm_auditor.py [--kc http://localhost:8090] [--api http://localhost:8000]
+  python infra/realm_auditor.py [--kc http://localhost:8090] [--api http://localhost:8000] [--origem-dev URL ...]
 
 Cria:
   * realm `auditor`, separado dos realms auditados, com MFA obrigatório por nível de autenticação (LoA): nível 1 =
@@ -87,7 +87,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kc", default="http://localhost:8090")
     ap.add_argument("--api", default="http://localhost:8000")
+    ap.add_argument("--origem-dev", action="append", default=[],
+                    help="origem extra aceita no retorno do login (desenvolvimento; ex.: http://localhost:8100)")
     a = ap.parse_args()
+    origens = [a.api] + [o.rstrip("/") for o in a.origem_dev]
     kc = KC(a.kc)
     kc.r("POST", "", json={"realm": REALM, "enabled": True, "displayName": "kc-auditor",
                            "loginWithEmailAllowed": False, "bruteForceProtected": True,
@@ -118,10 +121,10 @@ def main():
                             "access.token.claim": "true", "id.token.claim": "true", "userinfo.token.claim": "true"}}]})
         escopos = {s["name"]: s for s in kc.r("GET", f"/{REALM}/client-scopes")}
     acr = {"default.acr.values": "mfa", "minimum.acr.value": "mfa", "pkce.code.challenge.method": "S256",
-           "post.logout.redirect.uris": f"{a.api}/*"}
+           "post.logout.redirect.uris": "##".join(f"{o}/*" for o in origens)}
     clientes = {
         "kc-auditor-bff": {"publicClient": False, "standardFlowEnabled": True, "directAccessGrantsEnabled": False,
-                           "redirectUris": [f"{a.api}/auth/retorno"], "webOrigins": [a.api],
+                           "redirectUris": [f"{o}/auth/retorno" for o in origens], "webOrigins": origens,
                            "frontchannelLogout": False,
                            "attributes": {**acr, "backchannel.logout.url": f"{a.api}/auth/logout-canal",
                                           "backchannel.logout.session.required": "true"}},
