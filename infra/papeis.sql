@@ -58,6 +58,25 @@ GRANT SELECT (cadeia, seq, hash) ON trilha_auditoria TO kc_chaveiro;   -- encade
 GRANT USAGE ON SEQUENCE trilha_auditoria_id_seq TO kc_chaveiro;
 \endif
 
+\if :{?senha_assinador}
+-- assinador (W5, §6.2): lê os selos e a cabeça da trilha para conferir o manifesto e registra a assinatura
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'kc_assinador') THEN
+    CREATE ROLE kc_assinador LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+  END IF;
+END $$;
+ALTER ROLE kc_assinador PASSWORD :senha_assinador;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM kc_assinador;
+GRANT CONNECT ON DATABASE :"DBNAME" TO kc_assinador;
+GRANT USAGE ON SCHEMA public TO kc_assinador;
+GRANT SELECT (investigacao_id, tarefa_id, conta_id, inicio_ms, raiz, n_eventos, versao) ON selo TO kc_assinador;
+GRANT SELECT (id, trilha_publica) ON investigacao TO kc_assinador;
+GRANT INSERT ON trilha_auditoria TO kc_assinador;
+GRANT SELECT (cadeia, seq, hash) ON trilha_auditoria TO kc_assinador;
+GRANT USAGE ON SEQUENCE trilha_auditoria_id_seq TO kc_assinador;
+\endif
+
 \if :{?senha_api}
 DO $$
 BEGIN

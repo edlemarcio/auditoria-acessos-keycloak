@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kc-verificar"
+version = "1.0.0"
+description = "Verificador offline e independente dos pacotes de evidência do kc-auditor (formato 2)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["cryptography>=43", "rfc8785>=0.1.4", "asn1crypto>=1.5", "tzdata; sys_platform == 'win32'"]
+
+[project.scripts]
+kc-verificar = "kc_verificar.__main__:main"
+
+[tool.setuptools]
+packages = ["kc_verificar"]
+
+[tool.setuptools.package-data]
+kc_verificar = ["chaves/*.json", "raizes/*/*.pem", "raizes/*/*.crt", "raizes/*/README.md"]

@@ -1,0 +1,2 @@
+sRGB.icc: perfil sRGB do projeto colord (data/profiles), © 2012 Richard Hughes, licença CC0-1.0.
+Usado como OutputIntent dos PDFs/A gerados pelo auditor (auditor/relatorio.py).

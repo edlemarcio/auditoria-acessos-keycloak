@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from .sigilo import Cofre, abrir_extra
 
+import re as _re
+
+_TOKEN = _re.compile(r"[0-9A-Za-z:.\-\[\]]+")   # candidatos a IP (v4/v6) e id de sessão dentro de um texto
 CHAVE_PSEUDO = 0x6B70   # advisory lock da numeração por investigação
 NOMES = {"conta": "Conta", "ip": "IP", "sessao": "Sessão"}
 
@@ -32,11 +35,26 @@ def atribuir(cx, cf: Cofre) -> int:
                 vals = [v for v in (itens["ip"].get(h), d.get("start")) if v is not None]
                 itens["ip"][h] = min(vals) if vals else None
         novos = 0
+        # reexecução (§5.4): itens já vistos na investigação de origem herdam o rótulo; só os novos ganham número
+        from .reexecucao import herdados
+        ja_todos = {(r["classe"], r["hmac"]) for r in cx.execute(
+            "SELECT classe, hmac FROM pseudonimo WHERE investigacao_id=%s", (inv,))}
+        falta = any((c, h) not in ja_todos for c, hs in itens.items() for h in hs)
+        her = herdados(cx, cf, inv) if falta else {}
         for classe, hs in itens.items():
             ja = {r["hmac"] for r in cx.execute("SELECT hmac FROM pseudonimo WHERE investigacao_id=%s AND classe=%s",
                                                 (inv, classe))}
-            prox = cx.execute("SELECT coalesce(max(rotulo), 0) AS m FROM pseudonimo WHERE investigacao_id=%s AND "
-                              "classe=%s", (inv, classe)).fetchone()["m"]
+            usados = {r["rotulo"] for r in cx.execute("SELECT rotulo FROM pseudonimo WHERE investigacao_id=%s AND "
+                                                      "classe=%s", (inv, classe))}
+            for h in sorted(hs):
+                n = her.get((classe, h))
+                if h not in ja and n is not None and n not in usados:
+                    cx.execute("INSERT INTO pseudonimo (investigacao_id, classe, hmac, rotulo, primeiro_ms) "
+                               "VALUES (%s,%s,%s,%s,%s)", (inv, classe, h, n, hs[h]))
+                    ja.add(h)
+                    usados.add(n)
+                    novos += 1
+            prox = max([0, *usados, *(v for (c, _), v in her.items() if c == classe)])
             for h, p in sorted(((h, p) for h, p in hs.items() if h not in ja),
                                key=lambda x: (x[1] is None, x[1] or 0, x[0])):
                 prox += 1
@@ -51,13 +69,37 @@ def rotulos(cx, inv_id: int) -> dict[tuple[str, str], str]:
         "SELECT classe, hmac, rotulo FROM pseudonimo WHERE investigacao_id=%s", (inv_id,))}
 
 
+def regex_trie(valores) -> "re.Pattern":
+    """Uma expressão regular em trie (prefixos compartilhados) que casa qualquer dos valores, sempre o mais longo.
+    Com milhares de valores (IPs, sessões), a alternação simples testa cada um em cada posição; a trie não."""
+    import re
+    raiz: dict = {}
+    for v in valores:
+        n = raiz
+        for ch in v:
+            n = n.setdefault(ch, {})
+        n[""] = True
+
+    def rx(n: dict) -> str:
+        fim = "" in n
+        filhos = [re.escape(ch) + rx(f) for ch, f in sorted((k, v) for k, v in n.items() if k)]
+        if not filhos:
+            return ""
+        corpo = filhos[0] if len(filhos) == 1 else "(?:" + "|".join(filhos) + ")"
+        return f"(?:{corpo})?" if fim else corpo
+
+    return re.compile(rx(raiz))
+
+
 class Visao:
     """O que aparece na planilha, no dashboard e no pacote. Mascarada: pseudônimos no lugar de conta, IP e sessão,
     identificador do alvo mascarado nos textos e valores pessoais conhecidos trocados pelo pseudônimo."""
 
     def __init__(self, sem_mascara: bool, msk_alvo, rot: dict, cf: Cofre):
         self.sem_mascara, self.msk_alvo, self.rot, self.cf = sem_mascara, msk_alvo, rot, cf
-        self._troca: dict[str, str] = {}
+        self._troca: dict[str, str] = {}       # contas (poucos valores, qualquer texto): expressão em trie
+        self._alta: dict[str, str] = {}        # IPs e sessões (muitos valores, forma de token): busca exata
+        self._re, self._re_n = None, 0
 
     def conhecer(self, contas: list[dict], eventos: list[dict]):
         """Valores pessoais conhecidos (para trocar dentro de textos livres pelo pseudônimo correspondente)."""
@@ -72,7 +114,14 @@ class Visao:
                                                                        e.get("session_id"))):
                 r = self.rot.get((classe, ps))
                 if r and v:
-                    self._troca[v] = r
+                    self._alta[v] = r
+
+    def conhecer_valores(self, valores: dict):
+        """Como `conhecer`, a partir do mapa {(classe, hmac): valor} montado em streaming (consolidar)."""
+        for (classe, ps), v in valores.items():
+            r = self.rot.get((classe, ps))
+            if r and v:
+                (self._alta if classe in ("ip", "sessao") else self._troca)[v] = r
 
     def _rotulo(self, classe, ps, valor, vazio="—"):
         if not valor and not ps:
@@ -104,10 +153,25 @@ class Visao:
         if s is None or self.sem_mascara:
             return s
         s = str(s)
-        for v in sorted(self._troca, key=len, reverse=True):
-            if v in s:
-                s = s.replace(v, self._troca[v])
+        if self._troca:
+            if self._re is None or self._re_n != len(self._troca):
+                self._re = regex_trie(self._troca)
+                self._re_n = len(self._troca)
+            s = self._re.sub(lambda m: self._troca[m.group(0)], s)
+        if self._alta:
+            s = _TOKEN.sub(self._token, s)
         return self.msk_alvo(s)
+
+    def _token(self, m) -> str:
+        t = m.group(0)
+        r = self._alta.get(t)
+        if r:
+            return r
+        # IP com porta (1.2.3.4:8080, [::1]:443) ou pontuação colada
+        for corte in (t.rsplit(":", 1)[0], t.rsplit(":", 1)[0].strip("[]"), t.strip(".:-[]")):
+            if corte != t and corte in self._alta:
+                return t.replace(corte, self._alta[corte], 1)
+        return t
 
     def json(self, obj):
         """Estruturas (eventos administrativos, sessões): textos tratados; `representation` (a conta inteira

@@ -212,8 +212,8 @@ def calcular(cx, inv_id: int) -> dict:
             {FROM_EV} WHERE e.investigacao_id=%s AND e.time_ms >= %s AND e.time_ms < %s
             GROUP BY 1,2,3,4,5,6,7""", (inv_id, inv["inicio_ms"], inv["fim_ms"]))
         cx.execute("DELETE FROM agregado_ip WHERE investigacao_id=%s", (inv_id,))
-        cx.execute(f"""WITH base AS (SELECT DISTINCT ps_ip FROM evento WHERE investigacao_id=%(inv)s AND time_ms < %(ini)s
-                                 AND ps_ip IS NOT NULL)
+        cx.execute(f"""WITH base AS (SELECT DISTINCT e.ps_ip {FROM_EV} WHERE e.investigacao_id=%(inv)s
+                                 AND e.time_ms < %(ini)s AND e.ps_ip IS NOT NULL)
             INSERT INTO agregado_ip (investigacao_id, ps_ip, instancia_id, realm, client_id, type, ps_conta, novo, n,
                                      primeiro_ms, ultimo_ms)
             SELECT e.investigacao_id, e.ps_ip, e.instancia_id, e.realm, coalesce(e.client_id, ''), e.type,

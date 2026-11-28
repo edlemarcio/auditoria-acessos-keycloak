@@ -39,7 +39,7 @@ def checar(ok: bool, nome: str, detalhe: str = ""):
 
 def exportar(inv: int, saida: Path, sem_mascara=False, dsn=DSN) -> Path:
     cmd = [sys.executable, "-m", "auditor", "exportar", "--id", str(inv), "--saida", str(saida),
-           "--operador", "teste-w0"] + (["--sem-mascara"] if sem_mascara else [])
+           "--operador", "teste-w0", "--formato", "1"] + (["--sem-mascara"] if sem_mascara else [])   # regressão do v1
     subprocess.run(cmd, check=True, cwd=RAIZ, env={**os.environ, "AUDITOR_DSN": dsn, "AUDITOR_MODO": "local"}, capture_output=True)
     return saida / f"investigacao_{inv}{'_sem_mascara' if sem_mascara else ''}.zip"
 

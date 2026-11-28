@@ -7,7 +7,7 @@ naquela data, sem ver as cadeias de outras investigações.
 
   folha da cabeça = SHA-256(0x00 ‖ RFC 8785({"cadeia", "seq", "hash"})); nós como em merkle.py
 
-Carimbo: até a contratação da ACT ICP-Brasil (RFC 3161), um carimbo **simulado**, assinado com Ed25519 por uma chave
+Carimbo: RFC 3161 pela ACT de AUDITOR_TSA_URL (carimbo.py). Sem ela, um carimbo **simulado**, assinado com Ed25519 por uma chave
 local (AUDITOR_ACT_SIMULADA, padrão chaves/act_simulada.pem, gerada no primeiro uso) e marcado como tal.
 """
 from __future__ import annotations
@@ -65,6 +65,10 @@ def _chave_act() -> Ed25519PrivateKey:
 
 
 def carimbar(raiz: str) -> dict:
+    """RFC 3161 pela ACT configurada (AUDITOR_TSA_URL); sem ela, o carimbo simulado."""
+    from . import carimbo
+    if carimbo.configurado():
+        return carimbo.carimbo_ancora(raiz)
     k = _chave_act()
     corpo = {"raiz": raiz, "carimbado_em": datetime.now(timezone.utc).isoformat(), "politica": "simulada"}
     return {"tipo": "simulado", "aviso": "carimbo simulado (sem ACT ICP-Brasil); não atesta data perante terceiros",
@@ -74,6 +78,9 @@ def carimbar(raiz: str) -> dict:
 
 
 def verificar_carimbo(c: dict, raiz: str) -> bool:
+    if c.get("tipo") == "rfc3161":
+        from . import carimbo
+        return carimbo.verificar_ancora(c, raiz)
     corpo = {"raiz": c["raiz"], "carimbado_em": c["carimbado_em"], "politica": c["politica"]}
     try:
         Ed25519PublicKey.from_public_bytes(base64.b64decode(c["chave_publica"])).verify(

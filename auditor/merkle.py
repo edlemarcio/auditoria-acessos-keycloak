@@ -11,6 +11,7 @@ serve de oráculo: testar os 2³² IPv4 ou os CPFs válidos contra ela não conf
 from __future__ import annotations
 
 import hashlib
+import json
 
 import rfc8785
 
@@ -19,8 +20,25 @@ def como_recebido(e: dict) -> dict:
     return {k: v for k, v in e.items() if k != "id_g" and not (k == "id" and str(v).startswith("sha256:"))}
 
 
+def _simples(o) -> bool:
+    """Sem float e sem chave fora do BMP: aí json.dumps ordenado é byte a byte o RFC 8785."""
+    if isinstance(o, dict):
+        return all(isinstance(k, str) and max(map(ord, k), default=0) < 0x10000 and _simples(v) for k, v in o.items())
+    if isinstance(o, list):
+        return all(_simples(v) for v in o)
+    return not isinstance(o, float)
+
+
+def jcs(o) -> bytes:
+    """RFC 8785 (JCS). Caminho rápido pelo json da biblioteca padrão quando o resultado é idêntico."""
+    if _simples(o):
+        return json.dumps(o, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                          allow_nan=False).encode("utf-8")
+    return rfc8785.dumps(o)
+
+
 def canonico(e: dict) -> bytes:
-    return rfc8785.dumps(como_recebido(e))
+    return jcs(como_recebido(e))
 
 
 def folha(sal: bytes, canon: bytes) -> str:

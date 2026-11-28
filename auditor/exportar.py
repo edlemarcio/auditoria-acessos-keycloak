@@ -79,8 +79,13 @@ def _aba(wb, nome, cab, linhas, larguras=None, aviso=None, fmt_data=(), num=()):
     return wb
 
 
-def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False, soltos: bool = True) -> dict:
-    """`soltos=False` (worker de pacotes): só o zip, nada de XLSX e HTML soltos em disco (§6.4)."""
+def exportar(inv_id: int, saida: Path, operador: str, sem_mascara: bool = False, soltos: bool = True,
+             formato: int = 2, nome: str | None = None) -> dict:
+    """Pacote v2 (pacote.py, padrão desde a W5) ou v1 (`formato=1`, mantido para os testes de regressão da W-0).
+    `soltos=False` (worker de pacotes): só o zip, nada de XLSX e HTML soltos em disco (§6.4)."""
+    if formato == 2:
+        from .pacote import gerar
+        return gerar(inv_id, saida, operador, sem_mascara=sem_mascara, soltos=soltos, nome=nome)
     with conectar() as cx:
         inv = cx.execute("SELECT * FROM investigacao WHERE id=%s", (inv_id,)).fetchone()
     dig = alvo_de(inv, "exportar")

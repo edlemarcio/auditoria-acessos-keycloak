@@ -47,6 +47,8 @@ def main():
     print(f"investigação {I}")
     with banco(base.DSN_DONO) as cx:   # estado limpo para o teste: sem sessões nem revelações anteriores
         cx.execute("DELETE FROM revelacao WHERE investigacao_id=%s", (I,))
+        cx.execute("DELETE FROM revelacao WHERE sessao_id IN (SELECT id FROM sessao_analise WHERE investigacao_id=%s "
+                   "OR sub=%s)", (I, sub["investigador1"]))
         cx.execute("DELETE FROM sessao_analise WHERE investigacao_id=%s OR sub=%s", (I, sub["investigador1"]))
         cx.execute("DELETE FROM pedido WHERE investigacao_id=%s AND (tipo LIKE 'revelacao%%' OR tipo='lista_oficio')", (I,))
     api, wk = base.processos()

@@ -418,8 +418,9 @@ def decidir(ator: Ator, pedido_id: int, aprovar_: bool, motivo: str) -> dict:
 
 
 # ------------------------------------------------------------------ tabela do ofício
-def tabela_oficio(ator: Ator, inv_id: int, pedido_id: int) -> tuple[str, bytes]:
-    """XLSX do ofício (lista aprovada em bloco): IP, horários em UTC, quantidade; cada IP entregue vai para a trilha."""
+def tabela_oficio(ator: Ator, inv_id: int, pedido_id: int, formato: str = "xlsx") -> tuple[str, bytes]:
+    """XLSX ou PDF/A do ofício (lista aprovada em bloco): IP, horários em UTC, quantidade; cada IP entregue vai para a
+    trilha."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
@@ -466,8 +467,19 @@ def tabela_oficio(ator: Ator, inv_id: int, pedido_id: int) -> tuple[str, bytes]:
             for w in (ws, resumo):
                 for col in w.columns:
                     w.column_dimensions[col[0].column_letter].width = 22
-            b = io.BytesIO()
-            wb.save(b)
+            if formato == "pdf":
+                from . import relatorio
+                linhas = [[("—" if v is None else v.strftime("%d/%m/%Y %H:%M:%S") if isinstance(v, datetime) else v)
+                           for v in row] for row in ws.iter_rows(min_row=6, values_only=True)]
+                dados = relatorio.tabela_oficio(inv_id, pedido_id, linhas, ["IP", "Horário (UTC)", "Porta",
+                                                                            "Provedor (ASN)", "Aplicação", "Realm"],
+                                                {"Aprovada em": f"{p['decidido_em']:%d/%m/%Y %H:%M} UTC",
+                                                 "Fundamento": livres.get("fundamento") or "—",
+                                                 "Destinatário": livres.get("destinatario") or "—"})
+            else:
+                b = io.BytesIO()
+                wb.save(b)
+                dados = b.getvalue()
         trilha(cx, ator.username, "gerar_tabela_oficio", inv_id, pedido=pedido_id, quantidade=len(p["parametros"]["itens"]),
-               porta=ator.porta)
-    return f"oficio_{inv_id}_{pedido_id}.xlsx", b.getvalue()
+               porta=ator.porta, formato=formato)
+    return f"oficio_{inv_id}_{pedido_id}.{'pdf' if formato == 'pdf' else 'xlsx'}", dados

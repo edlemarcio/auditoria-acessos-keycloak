@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from . import sigilo
-from .db import conectar
+from .db import conectar, percorrer
 from .kc import ClienteKC, ErroKC
 
 GLOSSARIO = {
@@ -74,8 +74,13 @@ def extras_conta(inv_id: int):
                 cli.fechar()
 
 
-def consolidar(inv_id: int, filtros: dict | None = None, finalidade: str = "exportar") -> dict:
+def consolidar(inv_id: int, filtros: dict | None = None, finalidade: str = "exportar", com_eventos: bool = True,
+               amostra: int | None = None) -> dict:
     """Retorna todos os blocos do relatório. filtros: instancia, realm, cliente, categoria (lista).
+
+    `com_eventos=False` (pacote v2, em streaming): os eventos são lidos por cursor e não ficam na memória; `eventos`
+    traz só os `amostra` primeiros (para o dashboard HTML), `n_eventos` o total, e os destaques são calculados no
+    mesmo percurso.
 
     Os agregados são calculados em SQL sobre os pseudônimos (ps_ip); conta, IP e sessão em claro só existem em
     memória, decifrados com a DEK. Cada linha traz o valor e o pseudônimo, e a visão (pseudonimos.Visao) decide o que
@@ -131,31 +136,44 @@ def consolidar(inv_id: int, filtros: dict | None = None, finalidade: str = "expo
               extract(hour FROM to_timestamp(e.time_ms/1000.0) AT TIME ZONE %(fuso)s)::int AS hora, count(*) AS n
             {FROM} WHERE {W} AND e.type = ANY(%(logins)s) GROUP BY 1,2""",
                           {**args, "logins": list(LOGINS)}).fetchall()
-        eventos = []
-        for r in cx.execute(f"""SELECT e.time_ms, i.nome AS instancia, e.instancia_id, e.realm, e.conta_id, c.via, e.type,
+        # ---- eventos (lista inteira, ou percurso por cursor) e destaques no mesmo passo
+        base_dias = inv["parametros"].get("base_dias") or 0
+        base_ips = {r["ps_ip"] for r in cx.execute(
+            "SELECT DISTINCT e.ps_ip FROM evento e JOIN conta c ON c.id=e.conta_id AND c.incluida "
+            "WHERE e.investigacao_id=%s AND e.time_ms < %s", (inv_id, inv["inicio_ms"]))} if base_dias else set()
+        sql_ev = f"""SELECT e.time_ms, i.nome AS instancia, e.instancia_id, e.realm, e.conta_id, c.via, e.type,
               e.client_id, e.error, e.id, e.cifrado, e.ps_conta, e.ps_ip, e.ps_sessao,
               e.user_id, e.session_id, e.ip, e.details, e.bruto
-            {FROM} WHERE {W} ORDER BY e.time_ms, e.id""", args):
+            {FROM} WHERE {W} ORDER BY e.time_ms, e.id"""
+        eventos, fora, falhas, ip_novo, vistos, valores, n_ev = [], [], [], [], set(), {}, 0
+        linhas = cx.execute(sql_ev, args) if com_eventos else percorrer(cx, sql_ev, args)
+        for r in linhas:
             e = sigilo.abrir_evento(cf, r)
             c = por_id[e["conta_id"]]
             e["username"], e["conta_ps"] = c.get("username"), c.get("ps_conta")
-            eventos.append(e)
-        valor_ip = {e["ps_ip"]: e["ip"] for e in eventos if e["ps_ip"]}
+            e.pop("cifrado", None)
+            if not com_eventos:   # streaming: só os campos que os destaques e o dashboard usam
+                e.pop("bruto", None)
+                if len(eventos) >= (amostra or 0):
+                    e = _Leve(e)
+            n_ev += 1
+            if e["ps_ip"] and e["ip"]:
+                valores[("ip", e["ps_ip"])] = e["ip"]
+            if e["ps_sessao"] and e["session_id"]:
+                valores[("sessao", e["ps_sessao"])] = e["session_id"]
+            if com_eventos or len(eventos) < (amostra or 0):
+                eventos.append(e)
+            if e["type"] in LOGINS and _fora_expediente(e["time_ms"], tz):
+                fora.append(e)
+            elif e["type"] in FALHAS:
+                falhas.append(e)
+            if base_dias and e["ps_ip"] and e["ps_ip"] not in base_ips and e["ps_ip"] not in vistos:
+                vistos.add(e["ps_ip"])
+                ip_novo.append(e)
         for r in por_ip:
-            r["ip"] = valor_ip.get(r["ps_ip"])
-
-        # ---- destaques
-        fora = [e for e in eventos if e["type"] in LOGINS and _fora_expediente(e["time_ms"], tz)]
-        rajadas = _rajadas([e for e in eventos if e["type"] in FALHAS])
-        base_dias = inv["parametros"].get("base_dias") or 0
-        if base_dias:
-            base_ips = {r["ps_ip"] for r in cx.execute(
-                "SELECT DISTINCT ps_ip FROM evento WHERE investigacao_id=%s AND time_ms < %s", (inv_id, inv["inicio_ms"]))}
-            vistos, ip_novo = set(), []
-            for e in eventos:
-                if e["ps_ip"] and e["ps_ip"] not in base_ips and e["ps_ip"] not in vistos:
-                    vistos.add(e["ps_ip"]); ip_novo.append(e)
-        else:
+            r["ip"] = valores.get(("ip", r["ps_ip"]))
+        rajadas = _rajadas(falhas)
+        if not base_dias:
             ip_novo = None
 
         cob = cx.execute("""SELECT co.*, i.nome AS instancia FROM cobertura co
@@ -184,9 +202,28 @@ def consolidar(inv_id: int, filtros: dict | None = None, finalidade: str = "expo
 
     fr = fracoes(inv, cob)
     return {"inv": inv, "kpis": k, "janelas": janelas, "por_app": por_app, "por_ip": por_ip, "heat": heat,
-            "eventos": eventos, "fora": fora, "rajadas": rajadas, "ip_novo": ip_novo, "cobertura": cob,
+            "eventos": eventos, "n_eventos": n_ev, "valores": valores, "fora": fora, "rajadas": rajadas, "ip_novo": ip_novo, "cobertura": cob,
             "fracoes": fr, "contas": contas, "extras": extras, "tarefas": tarefas, "requisicoes": reqs,
             "filtros": {**f, "categorias": cats}, "instancias": insts, "cofre": cf}
+
+
+_CAMPOS_DESTAQUE = ("time_ms", "instancia", "instancia_id", "realm", "conta_id", "via", "type", "client_id", "ps_ip",
+                    "ip", "ps_sessao", "session_id", "username", "conta_ps", "user_id", "id")
+
+
+class _Leve:
+    """Evento guardado só para os destaques (streaming): os campos usados, em slots, sem o dict inteiro."""
+    __slots__ = _CAMPOS_DESTAQUE
+
+    def __init__(self, e: dict):
+        for k in _CAMPOS_DESTAQUE:
+            setattr(self, k, e.get(k))
+
+    def __getitem__(self, k):
+        return getattr(self, k)
+
+    def get(self, k, padrao=None):
+        return getattr(self, k, padrao)
 
 
 def _fora_expediente(t: int, tz) -> bool:

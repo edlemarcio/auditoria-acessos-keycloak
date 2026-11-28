@@ -1,0 +1,23 @@
+{
+ "formato": 1,
+ "chaves": [
+  {
+   "key_id": "local:c8c569fa744da305",
+   "algoritmo": "Ed25519",
+   "impressao_digital": "c8c569fa744da3055b9ef5588d226de457210c2d241322238c9b988b61d16f23",
+   "chave_publica": "7vVJ7K8IMhxDC4hQtrC6INxj6buyZPcMrnQnRWE/y7Q=",
+   "publicada_em": "2026-11-28",
+   "revogada_em": null,
+   "uso": "desenvolvimento (modo local; não vale para produção)"
+  },
+  {
+   "key_id": "vault:kc-auditor-assinatura:v1",
+   "algoritmo": "Ed25519",
+   "impressao_digital": "913c3846000c613b18d6614e32fdee70372636909deabe8bcccad44c2f841772",
+   "chave_publica": "SL+pCvNmLkBkn3s+eiWvtVQv9FM0sW6Vb7uPCvU1dRk=",
+   "publicada_em": "2026-11-28",
+   "revogada_em": null,
+   "uso": "homologação (Vault da stack local)"
+  }
+ ]
+}

@@ -58,6 +58,9 @@ ALVO = json.loads((RAIZ / "dados/pessoas.json").read_text())["casos"]["ALVO"]["c
 TESTE_U = ("w2teste1", "w2teste2")
 
 
+import random as _random
+SEQ = f"{_random.SystemRandom().randrange(10**7):07d}"   # nº do processo único por execução
+
 def checar(ok: bool, nome: str, detalhe="") -> bool:
     detalhe = str(detalhe)
     print(f"{'OK   ' if ok else 'FALHA'} {nome}{(' — ' + detalhe) if detalhe else ''}", flush=True)
@@ -284,7 +287,7 @@ def executar(m: Mestre):
            "1 estimativa não grava nada na trilha")
     corpo = {"cpf": ALVO, "de": de180, "ate": ate.isoformat(), "instancias": ["kc26", "rhsso"],
              "justificativa": "Apuração disciplinar 12/2026 (teste W2)", "tipo_processo": "apuracao_disciplinar",
-             "processo": "0001234-56.2026.6.05.0001", "rascunho": True}
+             "processo": f"{SEQ}-56.2026.6.05.0001", "rascunho": True}
     c, r = j("solicitante1", "POST", "/api/investigacoes", json=corpo)
     A = r.get("investigacao")
     checar(c == 201 and r.get("status") == "rascunho", "1 rascunho gravado sem enviar", r)
@@ -304,7 +307,7 @@ def executar(m: Mestre):
     c, inex = j("solicitante1", "GET", "/api/investigacoes/999999")
     checar(c == 404 and inex == {"erro": r.get("erro"), "mensagem": r.get("mensagem")},
            "1 inexistente e sem vínculo: a mesma resposta 404")
-    for q in ("0001234-56.2026.6.05.0001", "00012345620266050001", "0001234 56.2026/6 05 0001", str(A)):
+    for q in (f"{SEQ}-56.2026.6.05.0001", f"{SEQ}5620266050001", f"{SEQ} 56.2026/6 05 0001", str(A)):
         c, l = j("solicitante1", "GET", "/api/investigacoes", params={"q": q})
         if not checar(c == 200 and [i["id"] for i in l["itens"]] == [A], f"1 busca tolerante q={q!r}",
                       f"{l.get('total') if isinstance(l, dict) else l}"):
@@ -312,7 +315,7 @@ def executar(m: Mestre):
     cols = {r["column_name"] for r in banco().execute("SELECT column_name FROM information_schema.columns WHERE "
                                                       "table_name='investigacao'")}
     pc = banco().execute("SELECT processo_cifrado, processo_hmac FROM investigacao WHERE id=%s", (A,)).fetchone()
-    checar("processo" not in cols and b"0001234" not in bytes(pc["processo_cifrado"]) and len(pc["processo_hmac"]) == 64
+    checar("processo" not in cols and SEQ.encode() not in bytes(pc["processo_cifrado"]) and len(pc["processo_hmac"]) == 64
            and st("solicitante1", A)["processo"] == corpo["processo"] and st("auditor1", A).get("processo") is None,
            "1 processo cifrado com a DEK (busca pelo HMAC); só quem lê vê o processo")
     checar(j("auditor1", "GET", "/api/investigacoes", params={"q": corpo["processo"]})[1]["total"] == 0,
@@ -407,7 +410,8 @@ def executar(m: Mestre):
     checar(set(insts) == {"kc26", "rhsso"} and all(x["tarefas"]["concluida"] > 0 for x in insts.values()) and
            ac["progresso_pct"] == 100 and ac["eventos"] > 0, "1 acompanhamento: as duas instâncias, 100%, eventos",
            {k: x["tarefas"] for k, x in insts.items()})
-    checar(v["acoes"] == ["gerar_pacote", "pedir_sem_mascara"], "1 concluída: investigador gera pacote", v["acoes"])
+    checar(v["acoes"] == ["gerar_pacote", "pedir_sem_mascara", "reexecutar", "relatorio_agregado"],
+           "1 concluída: investigador gera pacote, reexecuta e baixa o relatório agregado (W5)", v["acoes"])
     checar(esperar(lambda: any(n["investigacao"] == A for n in notif("solicitante1", "coleta_concluida")) and
                    any(n["investigacao"] == A for n in notif("investigador1", "coleta_concluida")), 20, 1),
            "1 coleta concluída notificada ao solicitante e ao investigador")

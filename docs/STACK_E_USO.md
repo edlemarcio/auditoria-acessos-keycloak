@@ -334,10 +334,10 @@ AUDITOR_DSN=<kc_auditor_app> AUDITOR_DSN_DONO=<dono> KC_DSN_kc26=... KC_DSN_kc18
 | Item | Situação |
 | --- | --- |
 | DEK de terceiros (`DEK_t`) | Criada para toda investigação. A recifragem de uma conta excluída com a `DEK_t` (e de volta, na reinclusão) entra com a tela de inclusão e exclusão de contas (W2). Hoje nada é coletado de terceiros |
-| Carimbo do tempo | Simulado até a ACT (dependência externa) |
+| Carimbo do tempo | RFC 3161 desde a W5 (ACT de homologação até a contratação da ACT ICP-Brasil); âncoras antigas continuam simuladas |
 | Vault | Um nó, abertura manual. Produção: 3 nós (Raft), auto-unseal e TLS no listener. Certificados mTLS de 7 dias, reemitidos com `vault_setup.py --certificados` (sem rotação automática ainda) |
 | Identidade `api` | Recusada pelo `chaveiro` até a W1 (token OIDC do usuário designado) |
-| `assinador` e pacote v2 completo | W5 (`folhas.jsonl` com sais, `eventos_pseudonimizados.jsonl`, `pseudonimos.csv`, manifesto sem texto livre) |
+| `assinador` e pacote v2 completo | Feito na W5 (seção "Pacotes e prova") |
 | Papel `kc_coleta` separado | A aplicação usa um papel só. `selo`, `ancora` e trilha aceitam só inserção (trigger e permissões) |
 | Pedidos ao `chaveiro` | Com o cache de 5 min, uma investigação gera poucos pedidos (no teste: 1 por finalidade e processo). A medição sob carga fica para o teste de carga da W6 |
 
@@ -597,7 +597,7 @@ classe, motivos, fundamento e o histórico de revelações do investigador, nunc
 
 **Lista para ofício.** IPs juntados na tela ("Adicionar à lista para ofício"), enviados com motivo, fundamento e
 provedor; aprovados em bloco. Depois, só quem pediu baixa a tabela (XLSX, IP e horários em UTC), e cada IP entregue vai
-para a trilha. PDF fica para a W5.
+para a trilha. Em PDF/A desde a W5 (`?formato=pdf`).
 
 | Rota | O quê |
 | --- | --- |
@@ -619,7 +619,102 @@ tela, claro e escuro, axe).
 
 **Ficou para depois:** no modo vault, o `chaveiro` ainda não tem as regras das finalidades novas (revelação e decisão
 de pedidos de revelação), como já acontecia com as rotas da W2; o provedor (ASN) dos IPs da lista para ofício não é
-identificado; a tabela do ofício em PDF chega com o relatório PDF/A da W5.
+identificado. A tabela do ofício em PDF/A chegou na W5.
+
+## Pacotes e prova: etapa W5 (0.8.0)
+
+**Pacote v2.** `python -m auditor exportar` e o worker de pacotes chamam a mesma função (`auditor/pacote.py`). O
+formato é público e está em [docs/FORMATO_PACOTE.md](FORMATO_PACOTE.md). A geração é em streaming: os eventos são lidos
+por cursor no servidor e escritos direto no zip, um arquivo por percurso.
+
+* **Mascarado.** Leva `eventos_pseudonimizados.jsonl`, `folhas.jsonl` sem sais e `requisicoes.jsonl` redigido, com
+  compromisso com sal por linha.
+* **Sem máscara.** Leva os eventos originais, as folhas com sais, `pseudonimos.csv`, `compromissos.json` e o
+  documento de origem.
+* **Nos dois.** `fatias.json` (todas as raízes seladas, inclusive as das contas excluídas), `trilha.jsonl`,
+  `ancoras/` (com os `.tsr`), `resultados.json` e o relatório técnico em PDF/A-2b.
+* **Manifesto.** Não tem texto livre: justificativa, processo e operador vão como compromisso com sal, e os atores
+  são `sub` OIDC.
+* **Versões.** Cada pacote é imutável e versionado: `investigacao_14_v1.zip`, `_v2`…
+
+**Assinador.** `python -m auditor assinador --porta 8319` é o único processo com a política
+`transit/sign/kc-auditor-assinatura`. Ele precisa de `ASSINADOR_DSN` (papel `kc_assinador`, criado por
+`infra/papeis.sql` com `-v senha_assinador=…`), `ASSINADOR_SEGREDO` e `ASSINADOR_VAULT_TOKEN_FILE`. Antes de assinar,
+recalcula a raiz e as contagens a partir dos selos da cadeia e confere a cabeça da trilha e a chave declarada. Pedido
+que não confere é recusado, vai para a trilha e gera alerta no SIEM. O worker de pacotes usa `AUDITOR_ASSINADOR_URL`
+e `AUDITOR_ASSINADOR_SEGREDO`. Sem essas variáveis (modo local), a assinatura é no próprio processo, com a chave
+local e as mesmas conferências. As chaves públicas ficam em [chaves_publicas/](../chaves_publicas/README.md)
+(`python -m auditor publicar-chave`).
+
+**Carimbo do tempo.** Com `AUDITOR_TSA_URL`, o manifesto (`manifesto.tsr`) e as âncoras diárias recebem carimbo RFC
+3161, e as LCRs da cadeia da ACT vão no pacote (`lcr/`). A conferência é a mesma do verificador. Até a contratação da
+ACT ICP-Brasil, a homologação usa uma ACT local, com raiz de teste própria (não ICP-Brasil):
+
+```bash
+python infra/act_homologacao.py --gerar          # raiz, certificado da ACT e LCR em chaves/act/
+python infra/act_homologacao.py --porta 8318     # POST /tsa, GET /lcr.crl
+export AUDITOR_TSA_URL=http://localhost:8318/tsa AUDITOR_TSA_HOMOLOGACAO=1
+openssl ts -verify -data manifesto.json -in manifesto.tsr -CAfile chaves/act/raiz.pem   # conferência independente
+```
+
+A raiz de teste fica em `verificador/kc_verificar/raizes/homologacao/`, separada das AC-Raiz da ICP-Brasil
+(`raizes/icp-brasil/`). O verificador só a aceita com `--homologacao`.
+
+**Verificador offline.** O [`kc-verificar`](../verificador/README.md) é um pacote Python pequeno, sem banco e sem rede,
+que não importa nada do auditor. Ele tem três dependências (`cryptography`, `rfc8785`, `asn1crypto`), fixadas por hash
+em `verificador/requirements.lock`. Ele confere assinatura, carimbo, hashes, folhas, fatias, trilha e âncoras.
+`--recalcular` refaz KPIs, consolidado, destaques e cobertura pelas regras publicadas e compara com `resultados.json`
+(de onde sai o relatório), os CSVs e a planilha. `--revelacao` confere um evento revelado depois
+(`python -m auditor revelar-evento`). O worker roda o verificador em cada pacote logo depois de gerá-lo, e o resultado
+aparece na aba Pacotes. Em **Verificar pacote**, qualquer perfil envia um `.zip` de até 2 GB. O worker de pacotes o
+verifica em streaming, só com as chaves publicadas, e apaga o arquivo em seguida.
+
+**Relatório técnico e agregado.** `relatorio_N.pdf` (PDF/A-2b, validado no veraPDF) tem objeto, metodologia,
+cobertura e limitações antes dos resultados, destaques com os critérios, integridade, cadeia de custódia, nota
+metodológica e espaço para a assinatura do servidor responsável. O Solicitante baixa o relatório agregado na aba
+Pacotes. Ele não tem pseudônimos, IPs, contas nem destaques individuais. A tabela do ofício (W4) também sai em PDF/A
+(`?formato=pdf`).
+
+**Reexecução e comparação.** "Reexecutar" cria uma nova investigação vinculada (`execucao_anterior`), e a original
+não muda. No mesmo escopo, a nova já nasce aprovada, com as mesmas designações. Com período maior ou instâncias novas,
+o pedido volta para aprovação. No fechamento, os rótulos são herdados pelo valor original: o mesmo IP continua sendo
+"IP N". A aba **Comparar** mostra:
+
+* eventos novos no período comum;
+* eventos que deixaram de existir na origem;
+* eventos com conteúdo diferente;
+* possível alteração (Keycloak ≤ 21);
+* contas e cobertura.
+
+A comparação usa só rótulos.
+
+| Rota | O quê |
+| --- | --- |
+| `GET /api/investigacoes/{id}/pacotes` | pacotes com versão, formato, SHA-256 do manifesto e resultado do verificador |
+| `POST /api/investigacoes/{id}/reexecutar` `{motivo, de?, ate?, instancias?}` | nova investigação vinculada (step-up) |
+| `GET /api/investigacoes/{id}/comparacao[?recalcular=true]` | comparar execuções (investigador designado nas duas) |
+| `GET /api/investigacoes/{id}/relatorio-agregado` | relatório agregado em PDF/A |
+| `POST /api/verificacoes` (corpo: o zip) e `GET /api/verificacoes/{id}` | verificação pela web, no worker de pacotes |
+
+**Testes.**
+
+* `tests/pacote_v2.py` cobre:
+  * o verificador nos dois pacotes, com `--recalcular`;
+  * as adulterações, inclusive um worker comprometido que re-assina resultados falsos;
+  * a conta excluída, a revelação seletiva e a força bruta de IPv4 e CPF;
+  * a equivalência entre a CLI com chave local e o worker com o assinador e a chave do Vault.
+* `tests/carga_pacote.py` mede 500 mil eventos. Com 499.680 eventos, o pacote mascarado chegou a 634 MB de memória
+  em 11 min, e o sem máscara a 694 MB em 9 min. O verificador com `--recalcular` ficou em 377 MB e 435 MB, abaixo
+  da meta de 1 GB.
+* `tests/reexecucao.py` cobre a reexecução, a herança de rótulos, a comparação e os PDFs.
+* `web/e2e/aceite_w5.spec.ts` roda as telas, nos temas claro e escuro, com axe.
+
+**Ficou para depois:**
+
+* As AC-Raiz da ICP-Brasil não estão no repositório: conferir e versionar ao contratar a ACT.
+* No modo vault, o `chaveiro` ainda não tem as regras das finalidades novas (reexecução e comparação, com a DEK das
+  duas investigações), como já acontecia com as rotas da W2 e da W4.
+* O assinador fala HTTP com segredo compartilhado. Em produção, o canal é mTLS, como o chaveiro.
 
 ## Acessos da stack de teste
 

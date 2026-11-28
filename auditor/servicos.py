@@ -93,10 +93,13 @@ def fechar(inv_id: int) -> dict | None:
             if st in coleta.ESTADOS_PARADA:
                 return None
             extras_conta(inv_id)
-            r = investigar.fechar(inv_id)
+            # rótulos antes do status final: a investigação nunca aparece concluída sem a numeração (nem a herdada,
+            # na reexecução) — quem abre a tela logo depois do fim já vê "IP 12", não "numeração no fechamento"
             from .pseudonimos import atribuir
             from .sigilo import Cofre
-            r["pseudonimos"] = atribuir(cx, Cofre(inv_id, "fechar"))
+            n_ps = atribuir(cx, Cofre(inv_id, "fechar"))
+            r = investigar.fechar(inv_id)
+            r["pseudonimos"] = n_ps
             from .analise import calcular
             r["analise"] = calcular(cx, inv_id)   # agregados e destaques do dashboard (W3)
             cx.execute("UPDATE job SET status='concluido', atualizado=now() WHERE investigacao_id=%s "
@@ -156,6 +159,9 @@ def executar_job(cx, j: dict):
         elif j["tipo"] == "exportar":
             from .casos import gerar_pacote_job
             gerar_pacote_job(j["parametros"]["pacote"])
+        elif j["tipo"] == "verificar":   # verificação de pacote enviado pela web (W5)
+            from .casos import verificar_job
+            verificar_job(j["parametros"]["verificacao"])
         else:
             raise ValueError(f"tipo de job desconhecido: {j['tipo']}")
         cx.execute("UPDATE job SET status='concluido', erro=NULL, atualizado=now() WHERE id=%s", (j["id"],))
@@ -174,8 +180,8 @@ def worker(threads: int = 4, ocioso_s: float | None = None, parar: threading.Eve
            ao_fazer=None, papel: str = "todos") -> int:
     """Worker contínuo: jobs primeiro, depois tarefas de qualquer investigação em coleta (rodízio).
     Com `ocioso_s`, encerra quando passar esse tempo sem trabalho (testes e execuções pontuais).
-    papel: todos (modo local) | coleta (jobs preparar/fechar e tarefas) | pacotes (só jobs exportar)."""
-    tipos = {"todos": None, "coleta": ("preparar", "fechar", "recalcular"), "pacotes": ("exportar",)}[papel]
+    papel: todos (modo local) | coleta (jobs preparar/fechar e tarefas) | pacotes (jobs exportar e verificar)."""
+    tipos = {"todos": None, "coleta": ("preparar", "fechar", "recalcular"), "pacotes": ("exportar", "verificar")}[papel]
     parar = parar or threading.Event()
     feitas = [0]
     lock = threading.Lock()

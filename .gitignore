@@ -2,6 +2,8 @@
 chaves.env
 chaves/
 *.pem
+# exceção: certificados PÚBLICOS das raízes confiáveis do verificador (nunca chave privada)
+!verificador/kc_verificar/raizes/**/*.pem
 .env
 # dados gerados e saídas
 dados/pessoas.json
@@ -17,3 +19,5 @@ web/playwright-report/
 web/test-results/
 web/blob-report/
 web/playwright/.cache/
+verificador/build/
+verificador/*.egg-info/

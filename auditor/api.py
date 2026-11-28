@@ -561,10 +561,11 @@ def r_pedir_revelacao(inv: int, d: PedidoRevelacao, a: Ator = Depends(ator)):
 
 
 @app.get("/api/investigacoes/{inv}/oficios/{pedido}/tabela")
-def r_tabela_oficio(inv: int, pedido: int, a: Ator = Depends(ator)):
+def r_tabela_oficio(inv: int, pedido: int, formato: str = "xlsx", a: Ator = Depends(ator)):
     from . import revelacao
-    nome, dados = revelacao.tabela_oficio(a, inv, pedido)
-    return Response(dados, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    nome, dados = revelacao.tabela_oficio(a, inv, pedido, "pdf" if formato == "pdf" else "xlsx")
+    return Response(dados, media_type="application/pdf" if formato == "pdf" else
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{nome}"',
                              "X-Conteudo-Sha256": hashlib.sha256(dados).hexdigest()})
 
@@ -709,6 +710,46 @@ def r_pacotes(inv: int, a: Ator = Depends(ator)):
 @app.post("/api/investigacoes/{inv}/pacotes", status_code=202)
 def r_pedir_pacote(inv: int, d: PedidoPacote, a: Ator = Depends(ator)):
     return casos.pedir_pacote(a, inv, d.sem_mascara, d.destino)
+
+
+class Reexecucao(BaseModel):
+    motivo: str
+    de: str | None = None
+    ate: str | None = None
+    instancias: list[str] | None = None
+
+
+@app.post("/api/investigacoes/{inv}/reexecutar", status_code=201)
+def r_reexecutar(inv: int, d: Reexecucao, a: Ator = Depends(ator)):
+    from . import reexecucao
+    return reexecucao.reexecutar(a, inv, d.motivo, d.de, d.ate, d.instancias)
+
+
+@app.get("/api/investigacoes/{inv}/comparacao")
+def r_comparacao(inv: int, recalcular: bool = False, a: Ator = Depends(ator)):
+    from . import reexecucao
+    return reexecucao.comparar(a, inv, recalcular)
+
+
+@app.get("/api/investigacoes/{inv}/relatorio-agregado")
+def r_relatorio_agregado(inv: int, a: Ator = Depends(ator)):
+    nome, dados = casos.relatorio_agregado(a, inv)
+    return Response(dados, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{nome}"',
+                             "X-Conteudo-Sha256": hashlib.sha256(dados).hexdigest()})
+
+
+@app.post("/api/verificacoes", status_code=202)
+async def r_verificar_pacote(request: Request, a: Ator = Depends(ator)):
+    """Corpo: o .zip do pacote (application/zip), em streaming. Nome opcional em X-Nome-Arquivo."""
+    if int(request.headers.get("content-length") or 0) > casos.LIMITE_UPLOAD:
+        raise Negado("grande", "Pacote acima de 2 GB", 413)
+    return await casos.receber_verificacao(a, request.headers.get("x-nome-arquivo"), request.stream())
+
+
+@app.get("/api/verificacoes/{vid}")
+def r_verificacao(vid: int, a: Ator = Depends(ator)):
+    return casos.verificacao(a, vid)
 
 
 @app.get("/api/aprovacoes")

@@ -31,7 +31,7 @@ DOC_TIPOS = ((b"%PDF-", "application/pdf"), (b"\x89PNG\r\n\x1a\n", "image/png"),
 POR_PAGINA = 25
 ACOES = ("enviar", "editar", "descartar", "aprovar", "devolver", "recusar", "cancelar", "reenviar",
          "autorizar_preservacao", "prorrogar_preservacao", "iniciar", "pausar", "retomar", "gerar_pacote",
-         "pedir_sem_mascara", "enviar_documento", "baixar_documento")
+         "pedir_sem_mascara", "enviar_documento", "baixar_documento", "reexecutar", "comparar", "relatorio_agregado")
 
 
 def _inv(cx, inv_id: int) -> dict:
@@ -197,6 +197,13 @@ def acoes(ctx: _Ctx, i: dict) -> list[str]:
               "concluida_com_lacunas": ["gerar_pacote", "pedir_sem_mascara"]}.get(st, [])
     if ctx.tem_doc(i["id"]) and (decide or inv or "aprovador" in f):
         a.append("baixar_documento")
+    finais = st in ("concluida", "concluida_com_lacunas", "parcial") and not i["lacrada"]
+    if finais and (inv or (dono and ator.tem("solicitante"))):
+        a.append("reexecutar")
+    if finais and inv and i.get("execucao_anterior"):
+        a.append("comparar")
+    if st in ("concluida", "concluida_com_lacunas") and not i["lacrada"] and (inv or (dono and ator.tem("solicitante"))):
+        a.append("relatorio_agregado")
     return [x for x in ACOES if x in a]
 
 
@@ -546,6 +553,10 @@ def ver(ator: Ator, inv_id: int) -> dict:
         v.update({"instancias": nomes, "varredura": bool((i["parametros"] or {}).get("varredura")),
                   "base_dias": (i["parametros"] or {}).get("base_dias") or 0})
         v["expiracao"] = gestao.expiracao(cx, i["inicio_ms"], nomes)
+        v["execucao_anterior"] = i["execucao_anterior"]
+        v["reexecucoes"] = [r["id"] for r in cx.execute(
+            "SELECT id FROM investigacao WHERE execucao_anterior=%s AND status NOT IN ('rascunho','descartada') "
+            "ORDER BY id", (inv_id,))]
         n = cx.execute("SELECT count(*) n FROM tarefa WHERE investigacao_id=%s", (inv_id,)).fetchone()["n"]
         est = gestao.estimar(cx, i["inicio_ms"], i["fim_ms"], nomes, (i["parametros"] or {}).get("varredura", False),
                              (i["parametros"] or {}).get("base_dias") or 0)
@@ -971,7 +982,11 @@ def pacotes(ator: Ator, inv_id: int) -> list[dict]:
     _lacrada(_investigador(ator, inv_id))
     with conectar() as cx:
         return [{"pacote": r["id"], "sem_mascara": r["sem_mascara"], "status": r["status"], "sha256": r["sha256"],
-                 "criado_em": r["criado_em"].isoformat(), "expira_em": r["expira_em"] and r["expira_em"].isoformat()}
+                 "criado_em": r["criado_em"].isoformat(), "expira_em": r["expira_em"] and r["expira_em"].isoformat(),
+                 "formato": r["formato"], "versao": r["versao"], "nome": r["nome"],
+                 "manifesto_sha256": r["manifesto_sha256"], "eventos": r["eventos"],
+                 "verificacao": r["verificacao"] and {k: r["verificacao"].get(k) for k in
+                                                      ("integro", "frase", "quando", "itens", "resumo")}}
                 for r in cx.execute("SELECT * FROM pacote WHERE investigacao_id=%s ORDER BY id", (inv_id,))]
 
 
@@ -1019,24 +1034,136 @@ def baixar(ator: Ator, tok: str) -> tuple[str, bytes]:
 
 def gerar_pacote_job(pacote_id: int):
     """Executado pelo worker de pacotes (identidade `pacotes` no chaveiro). Nada solto em disco: só o zip, na área
-    do worker; o sem máscara expira em 24 h."""
+    do worker; o sem máscara expira em 24 h. Pacotes imutáveis e versionados (`investigacao_12_v1`, `_v2`…, §6.7).
+    Logo depois de gerado, o pacote passa pelo verificador offline; o resultado aparece na aba Pacotes."""
     from .exportar import exportar
     with conectar() as cx:
         p = cx.execute("SELECT * FROM pacote WHERE id=%s", (pacote_id,)).fetchone()
+        v = cx.execute("SELECT coalesce(max(versao), 0) + 1 AS v FROM pacote WHERE investigacao_id=%s AND "
+                       "sem_mascara=%s AND id<>%s", (p["investigacao_id"], p["sem_mascara"], pacote_id)).fetchone()["v"]
+        cx.execute("UPDATE pacote SET versao=%s, formato=2 WHERE id=%s", (v, pacote_id))
+    nome = f"investigacao_{p['investigacao_id']}{'_sem_mascara' if p['sem_mascara'] else ''}_v{v}"
     try:
         r = exportar(p["investigacao_id"], PASTA_PACOTES / str(pacote_id), p["pedido_por"],
-                     sem_mascara=p["sem_mascara"], soltos=False)
+                     sem_mascara=p["sem_mascara"], soltos=False, nome=nome)
         sha = hashlib.sha256(Path(r["pacote"]).read_bytes()).hexdigest()
+        verif = verificar_gerado(Path(r["pacote"]))
         with conectar() as cx:
-            cx.execute("UPDATE pacote SET status='pronto', arquivo=%s, sha256=%s, pronto_em=now(), expira_em=%s "
-                       "WHERE id=%s", (r["pacote"], sha, datetime.now(timezone.utc) + VALIDADE_SEM_MASCARA
-                                       if p["sem_mascara"] else None, pacote_id))
+            cx.execute("UPDATE pacote SET status='pronto', arquivo=%s, sha256=%s, pronto_em=now(), expira_em=%s, "
+                       "nome=%s, manifesto_sha256=%s, eventos=%s, verificacao=%s WHERE id=%s",
+                       (r["pacote"], sha, datetime.now(timezone.utc) + VALIDADE_SEM_MASCARA if p["sem_mascara"]
+                        else None, nome + ".zip", r["manifesto_sha256"], r["eventos"], Jsonb(verif), pacote_id))
+            if not verif["integro"]:
+                trilha(cx, "pacotes", "pacote_nao_confere", p["investigacao_id"], pacote=pacote_id)
+                from . import siem
+                siem.enviar("pacote_nao_confere", "alerta", investigacao=p["investigacao_id"], pacote=pacote_id)
     except Exception as e:  # noqa: BLE001
         from .redigir import erro
         with conectar() as cx:
             cx.execute("UPDATE pacote SET status='falhou', erro=%s WHERE id=%s", (erro(f"{type(e).__name__}: {e}"),
                                                                                   pacote_id))
         raise
+
+
+def relatorio_agregado(ator: Ator, inv_id: int) -> tuple[str, bytes]:
+    """Relatório agregado em PDF/A-2b (§6.6): o que o Solicitante recebe na aba Pacotes. Sem dado individual."""
+    from . import casos_analise, relatorio
+    v = casos_analise.visao_agregada(ator, inv_id)
+    with conectar() as cx:
+        i = _inv(cx, inv_id)
+        if i["status"] not in ("concluida", "concluida_com_lacunas"):
+            raise Negado("estado", "O relatório agregado fica disponível quando a coleta termina", 409)
+        pdf = relatorio.agregado(i, v, gestao.status_publico(i))
+        trilha(cx, ator.sub, "gerar_relatorio_agregado", inv_id, sha256=hashlib.sha256(pdf).hexdigest(),
+               porta=ator.porta)
+    return f"relatorio_agregado_{inv_id}.pdf", pdf
+
+
+# ------------------------------------------------------------------ verificação pela web (§6.5)
+PASTA_VERIFICACOES = Path("saida/verificacoes")
+LIMITE_UPLOAD = 2 * 1024 ** 3
+
+
+async def receber_verificacao(ator: Ator, nome: str | None, corpo) -> dict:
+    """Recebe o pacote em streaming (sem carregar na memória da API), até 2 GB, e enfileira a verificação para o
+    worker de pacotes. `corpo`: iterador assíncrono de blocos (request.stream())."""
+    ator.exigir_perfil()
+    PASTA_VERIFICACOES.mkdir(parents=True, exist_ok=True)
+    with conectar() as cx:
+        vid = cx.execute("INSERT INTO verificacao (sub, nome, status) VALUES (%s,%s,'recebendo') RETURNING id",
+                         (ator.sub, (Path(nome or "pacote.zip").name or "pacote.zip")[:120])).fetchone()["id"]
+    arq = PASTA_VERIFICACOES / f"{vid}.zip"
+    h, n = hashlib.sha256(), 0
+    try:
+        with arq.open("wb") as f:
+            async for bloco in corpo:
+                n += len(bloco)
+                if n > LIMITE_UPLOAD:
+                    raise Negado("grande", "Pacote acima de 2 GB", 413)
+                h.update(bloco)
+                f.write(bloco)
+    except BaseException:
+        arq.unlink(missing_ok=True)
+        with conectar() as cx:
+            cx.execute("UPDATE verificacao SET status='falhou', erro='upload interrompido ou acima do limite' "
+                       "WHERE id=%s", (vid,))
+        raise
+    if n == 0:
+        arq.unlink(missing_ok=True)
+        raise Negado("validacao", "Arquivo vazio", 422)
+    with conectar() as cx:
+        cx.execute("UPDATE verificacao SET status='pendente', sha256=%s, tamanho=%s, arquivo=%s WHERE id=%s",
+                   (h.hexdigest(), n, str(arq), vid))
+        cx.execute("INSERT INTO job (tipo, investigacao_id, parametros) VALUES ('verificar', NULL, %s)",
+                   (Jsonb({"verificacao": vid}),))
+        trilha(cx, ator.sub, "pedir_verificacao_pacote", None, verificacao=vid, sha256=h.hexdigest(), tamanho=n,
+               porta=ator.porta)
+    return {"verificacao": vid, "status": "pendente", "sha256": h.hexdigest(), "tamanho": n}
+
+
+def verificacao(ator: Ator, vid: int) -> dict:
+    ator.exigir_perfil()
+    with conectar() as cx:
+        v = cx.execute("SELECT * FROM verificacao WHERE id=%s", (vid,)).fetchone()
+    if not v or v["sub"] != ator.sub:
+        raise Negado("inexistente", "Verificação inexistente", 404)
+    return {"verificacao": v["id"], "status": v["status"], "nome": v["nome"], "sha256": v["sha256"],
+            "tamanho": v["tamanho"], "criado_em": v["criado_em"].isoformat(),
+            "concluido_em": v["concluido_em"] and v["concluido_em"].isoformat(), "resultado": v["resultado"],
+            "erro": v["erro"]}
+
+
+def verificar_job(vid: int):
+    """Worker de pacotes: verifica o arquivo enviado só com as chaves publicadas e o apaga em seguida."""
+    with conectar() as cx:
+        v = cx.execute("UPDATE verificacao SET status='verificando' WHERE id=%s RETURNING *", (vid,)).fetchone()
+    arq = Path(v["arquivo"])
+    try:
+        r = verificar_gerado(arq, recalcular=True)
+        with conectar() as cx:
+            cx.execute("UPDATE verificacao SET status='pronta', resultado=%s, concluido_em=now(), arquivo=NULL "
+                       "WHERE id=%s", (Jsonb(r), vid))
+            trilha(cx, "pacotes", "verificar_pacote", None, verificacao=vid, sha256=v["sha256"], integro=r["integro"],
+                   investigacao=(r.get("resumo") or {}).get("investigacao"))
+    except Exception as e:  # noqa: BLE001
+        from .redigir import erro
+        with conectar() as cx:
+            cx.execute("UPDATE verificacao SET status='falhou', erro=%s, concluido_em=now(), arquivo=NULL WHERE id=%s",
+                       (erro(f"{type(e).__name__}: {e}")[:300], vid))
+    finally:
+        arq.unlink(missing_ok=True)
+
+
+def verificar_gerado(zp: Path, recalcular: bool = True) -> dict:
+    """Roda o verificador offline (com --recalcular) sobre o pacote recém-gerado. Só as chaves publicadas."""
+    import os
+    from . import carimbo  # noqa: F401  (põe verificador/ no caminho)
+    from kc_verificar.__main__ import frase
+    from kc_verificar.pacote import verificar
+    r = verificar(zp, homologacao=os.environ.get("AUDITOR_TSA_HOMOLOGACAO") == "1", recalcular=recalcular)
+    return {"integro": r.integro, "frase": frase(r), "quando": datetime.now(timezone.utc).isoformat(),
+            "resumo": {k: v for k, v in r.resumo.items() if k != "pacote_sha256"},
+            "itens": [{"nivel": i.nivel, "texto": i.texto} for i in r.itens]}
 
 
 # ------------------------------------------------------------------ notificações (W2 §9) e pedido de acesso (§10)

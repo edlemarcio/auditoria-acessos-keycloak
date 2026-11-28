@@ -10,8 +10,12 @@
   python -m auditor pausar --id N --operador X  pausa a coleta (as fatias param no próximo checkpoint)
   python -m auditor retomar --id N [--fila]     continua do último ponto salvo (na hora ou pelo worker)
   python -m auditor cancelar --id N --operador X --motivo "..."
-  python -m auditor exportar --id N --saida d/  gera XLSX, CSV, dashboard HTML e manifesto assinado
-  python -m auditor verificar pacote.zip --chave-publica chaves/assinatura.pub.pem
+  python -m auditor exportar --id N --saida d/  pacote v2 (docs/FORMATO_PACOTE.md); --formato 1 para o antigo
+  python -m auditor verificar pacote.zip        v2: kc-verificar (offline); v1: --chave-publica chaves/assinatura.pub.pem
+  python -m auditor revelar-evento --id N --evento ID --operador X --motivo "..." --saida r.json
+                                                revelação seletiva verificável de um evento (W5)
+  python -m auditor assinador [--porta 8319]    serviço de assinatura isolado (W5; ASSINADOR_DSN, token do Vault)
+  python -m auditor publicar-chave              acrescenta a chave de assinatura atual às chaves publicadas
   python -m auditor chaveiro [--porta 8443]     porteiro das chaves no modo vault (CHAVEIRO_DSN, token do Vault)
   python -m auditor ancorar [--ate AAAA-MM-DD]  âncora diária das cadeias da trilha (o worker faz sozinho)
   python -m auditor verificar-cadeia [--id N]   confere as cadeias da trilha e as âncoras
@@ -199,10 +203,21 @@ def cmd_worker(a):
 
 def cmd_exportar(a):
     from .exportar import exportar
-    print(exportar(a.id, Path(a.saida), a.operador, sem_mascara=a.sem_mascara))
+    print(exportar(a.id, Path(a.saida), a.operador, sem_mascara=a.sem_mascara, formato=a.formato))
 
 
 def cmd_verificar(a):
+    import json as _json
+    import zipfile as _zip
+    with _zip.ZipFile(a.pacote) as z:
+        formato = _json.loads(z.read("manifesto.json")).get("formato", 1)
+    if formato == 2:   # o verificador offline, independente do auditor
+        from .carimbo import _VERIFICADOR  # noqa: F401  (põe verificador/ no caminho)
+        from kc_verificar.__main__ import main
+        raise SystemExit(main([a.pacote] + (["--homologacao"] if os.environ.get("AUDITOR_TSA_HOMOLOGACAO") == "1"
+                                            else []) + (["--recalcular"] if a.recalcular else [])))
+    if not a.chave_publica:
+        raise SystemExit("pacote v1: informe --chave-publica")
     from .manifesto import verificar_pacote
     ok, msgs = verificar_pacote(Path(a.pacote), Path(a.chave_publica).read_bytes())
     for m in msgs:
@@ -255,6 +270,25 @@ def cmd_conferir_migracao(a):
     r = cm.resumo(linhas)
     print(json.dumps(r, ensure_ascii=False))
     return 1 if r["v1"]["divergem"] or r["atual"]["divergem"] else 0
+
+
+def cmd_assinador(a):
+    from .assinador import servir
+    servir(a.porta)
+
+
+def cmd_publicar_chave(a):
+    from .assinador import publicar
+    r = publicar([Path(x) for x in a.destino])
+    print(f"{r['key_id']}  {r['impressao_digital']}")
+
+
+def cmd_revelar_evento(a):
+    from .pacote import revelar_evento
+    r = revelar_evento(a.id, a.evento, a.operador, a.motivo)
+    Path(a.saida).write_text(json.dumps(r, ensure_ascii=False, indent=1))
+    print(f"{a.saida}: evento da fatia {r['fatia']} com sal e prova de inclusão (confira com kc-verificar "
+          f"pacote.zip --revelacao {a.saida})")
 
 
 def cmd_api(a):
@@ -317,14 +351,25 @@ def main():
     p.set_defaults(f=cmd_worker)
     p = sp.add_parser("exportar"); p.add_argument("--id", type=int, required=True)
     p.add_argument("--saida", default="saida"); p.add_argument("--operador", default="auditor")
-    p.add_argument("--sem-mascara", action="store_true"); p.set_defaults(f=cmd_exportar)
-    p = sp.add_parser("verificar"); p.add_argument("pacote"); p.add_argument("--chave-publica", required=True)
+    p.add_argument("--sem-mascara", action="store_true")
+    p.add_argument("--formato", type=int, choices=(1, 2), default=2); p.set_defaults(f=cmd_exportar)
+    p = sp.add_parser("verificar"); p.add_argument("pacote"); p.add_argument("--chave-publica")
+    p.add_argument("--recalcular", action="store_true")
     p.set_defaults(f=cmd_verificar)
     p = sp.add_parser("ancorar"); p.add_argument("--ate"); p.set_defaults(f=cmd_ancorar)
     p = sp.add_parser("verificar-cadeia"); p.add_argument("--id", type=int); p.add_argument("--verboso",
                                                                                         action="store_true")
     p.set_defaults(f=cmd_verificar_cadeia)
     p = sp.add_parser("api"); p.add_argument("--porta", type=int, default=8000); p.set_defaults(f=cmd_api)
+    p = sp.add_parser("assinador"); p.add_argument("--porta", type=int, default=8319); p.set_defaults(f=cmd_assinador)
+    p = sp.add_parser("publicar-chave")
+    p.add_argument("--destino", action="append",
+                   default=["chaves_publicas/chaves.json", "verificador/kc_verificar/chaves/chaves.json"])
+    p.set_defaults(f=cmd_publicar_chave)
+    p = sp.add_parser("revelar-evento"); p.add_argument("--id", type=int, required=True)
+    p.add_argument("--evento", required=True, help="ID do evento (coluna da planilha)")
+    p.add_argument("--operador", required=True); p.add_argument("--motivo", required=True)
+    p.add_argument("--saida", required=True); p.set_defaults(f=cmd_revelar_evento)
     p = sp.add_parser("conferir-migracao"); p.add_argument("--pasta", action="append", default=None)
     p.set_defaults(f=lambda a: cmd_conferir_migracao(a) if a.pasta else cmd_conferir_migracao(
         argparse.Namespace(pasta=["saida"])))

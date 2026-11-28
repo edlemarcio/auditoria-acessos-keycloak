@@ -118,7 +118,7 @@ def main():
     pac = exportar(inv, RAIZ / "saida" / "teste_cadeia", "teste-cadeia")["pacote"]
     with zipfile.ZipFile(pac) as z:
         linhas = [json.loads(x) for x in z.read("trilha.jsonl").splitlines()]
-        provas = [json.loads(z.read(n)) for n in z.namelist() if n.startswith("ancoras/")]
+        provas = [json.loads(z.read(n)) for n in z.namelist() if n.startswith("ancoras/") and n.endswith(".json")]
         fatias = json.loads(z.read("fatias.json"))
         trilha_bruta = z.read("trilha.jsonl")
     ant, ok_t = genese(inv), True

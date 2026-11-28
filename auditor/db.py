@@ -27,6 +27,10 @@ SNAPSHOTS_DA_INVESTIGACAO = """
 sub_atual: contextvars.ContextVar[str | None] = contextvars.ContextVar("sub_atual", default=None)
 
 
+import itertools as _it
+_PERCURSOS = _it.count(1)
+
+
 def conectar(autocommit: bool = True) -> psycopg.Connection:
     cx = psycopg.connect(DSN, autocommit=autocommit, row_factory=dict_row)
     sub = sub_atual.get()
@@ -35,6 +39,14 @@ def conectar(autocommit: bool = True) -> psycopg.Connection:
         if not autocommit:
             cx.commit()
     return cx
+
+
+def percorrer(cx, sql: str, args=None, lote: int = 2000):
+    """Linhas de uma consulta por cursor no servidor, em lotes: memória limitada para qualquer volume (pacote v2)."""
+    with cx.transaction(), cx.cursor(name=f"percurso_{next(_PERCURSOS)}") as cur:
+        cur.itersize = lote
+        cur.execute(sql, args)
+        yield from cur
 
 
 def migrar_esquema(revisao: str = "head"):
