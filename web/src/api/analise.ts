@@ -36,8 +36,8 @@ export interface Dashboard {
 
 export interface Evento { ref: string; horario: string; instancia: string; realm: string; aplicacao: string | null;
   tipo: string; tipo_nome: string; categoria: string; conta: string | null; ip: string | null; sessao: string | null;
-  resultado: string }
-export interface PaginaEventos { total: number; total_filtrado: number; filtros: Filtros; preliminar: boolean;
+  resultado: string; revelado?: Record<string, unknown> }
+export interface PaginaEventos { total: number; total_filtrado: number; filtros: Filtros; preliminar: boolean; sessao_ativa?: boolean;
   rotulos_definitivos: boolean; proximo: string | null; itens: Evento[] }
 export interface DetalheEvento extends Evento { detalhes: Record<string, unknown>; json: Record<string, unknown>;
   folha: string | null; hash_conteudo: string | null; evento_id: string

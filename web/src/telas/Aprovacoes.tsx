@@ -14,6 +14,10 @@ export const TIPO_PEDIDO: Record<string, { rotulo: string; icone: string }> = {
   investigacao: { rotulo: 'Pedido de investigação', icone: 'fa-search' },
   preservacao_urgente: { rotulo: 'Preservação urgente', icone: 'fa-lock' },
   pacote_sem_mascara: { rotulo: 'Pacote sem máscara', icone: 'fa-eye' },
+  revelacao_cota: { rotulo: 'Revelação acima da cota', icone: 'fa-eye' },
+  revelacao_terceiro: { rotulo: 'Revelação de dado de terceiro', icone: 'fa-user-friends' },
+  revelacao_total: { rotulo: 'Revelação total', icone: 'fa-eye' },
+  lista_oficio: { rotulo: 'Lista para ofício', icone: 'fa-file-alt' },
 }
 
 /** Fila do W1 (/api/aprovacoes) com prazo e escalonamento vindos do /api/inicio (o contrato não os põe na fila). */

@@ -6,11 +6,11 @@ import { defineConfig, devices } from '@playwright/test'
  */
 export default defineConfig({
   testDir: 'e2e',
-  testMatch: ['aceite_w2.spec.ts', 'aceite_w3.spec.ts'],
+  testMatch: ['aceite_w2.spec.ts', 'aceite_w3.spec.ts', 'aceite_w4.spec.ts'],
   workers: 1,
   retries: 0,
   timeout: 900_000,
   reporter: [['list']],
-  use: { baseURL: 'http://localhost:8000', locale: 'pt-BR', timezoneId: 'America/Bahia', trace: 'retain-on-failure' },
+  use: { actionTimeout: 30_000, baseURL: 'http://localhost:8000', locale: 'pt-BR', timezoneId: 'America/Bahia', trace: 'retain-on-failure' },
   projects: [{ name: 'aceite', use: { ...devices['Desktop Chrome'] } }],
 })

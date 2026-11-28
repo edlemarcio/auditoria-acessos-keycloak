@@ -419,3 +419,19 @@ button.barra-linha:hover { background: var(--tom-azul-bg); }
 .faixa.pendente { background: var(--tom-cinza-bd); }
 .classe-cob { display: inline-flex; align-items: center; gap: 6px; }
 @media (forced-colors: active) { .faixa, .barra, .mapa-celula, .chave-linha { forced-color-adjust: none; } }
+
+/* ------------------------------------------------------------------ revelação (W4) */
+.barra-sessao { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 0 0 16px; padding: 8px 12px;
+  border: 1px solid var(--tom-roxo-bd); border-radius: 6px; background: var(--app-superficie); }
+.barra-sessao-aviso { flex-basis: 100%; }
+.barra-sessao-aviso:empty { display: none; }
+.revelado { white-space: nowrap; }
+.valor-revelado { font-family: monospace; color: var(--tom-roxo-tx); background: var(--tom-roxo-bg); padding: 0 4px; border-radius: 3px; }
+pre.valor-revelado { display: block; padding: 8px; white-space: pre-wrap; }
+.marca-dagua { position: fixed; inset: 0; pointer-events: none; z-index: 50; overflow: hidden; display: flex; flex-wrap: wrap;
+  gap: 80px 120px; padding: 40px; transform: rotate(-24deg) scale(1.4); opacity: .07; color: var(--app-texto); font-size: 1rem;
+  user-select: none; }
+@media (forced-colors: active) { .marca-dagua { display: none; } }
+@media (max-width: 767px) { .revelar { display: none; } }
+.lista-oficio { margin-bottom: 16px; }
+.marca-dagua span::after { content: attr(data-t); white-space: nowrap; }

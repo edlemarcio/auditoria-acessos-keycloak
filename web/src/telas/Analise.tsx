@@ -12,6 +12,8 @@ import { Area } from '../componentes/Campo'
 import { Dialogo } from '../componentes/Dialogo'
 import { ErroTela, Esqueleto, Icone, Mensagem, textoErro, Vazio } from '../componentes/Estado'
 import { Barras, GraficoSerie, MapaCalor } from '../componentes/Graficos'
+import { AdicionarOficio, ListaOficio, Revelar, useAnalise } from '../componentes/SessaoAnalise'
+import { textoValor } from '../api/revelacao'
 import { data, dataHora, numero } from '../dominio/formato'
 import { useCarregar } from '../usar'
 
@@ -277,9 +279,14 @@ export function Eventos({ d }: { d: Detalhe }) {
   const [rotuloIp, setRotuloIp] = useState(f.ip ?? '')
   const [rotuloConta, setRotuloConta] = useState(f.conta ?? '')
   useEffect(() => { setRotuloIp(f.ip ?? ''); setRotuloConta(f.conta ?? '') }, [f.ip, f.conta])
+  const an = useAnalise()
   if (erro) return <ErroTela erro={erro} investigacao={d.id} tentar={recarregar} />
   const visiveis = COLUNAS.filter((c) => colunas.includes(c.id))
+  const comRevelados = Boolean(an?.est?.sessao && an.est.revelados.length)
+  const valoresDa = (e: A.Evento) => (['conta', 'ip', 'sessao'] as const).map((k) => {
+    const r = an?.revelado(k, e[k]); return r ? `${e[k]}: ${textoValor(r.valor)}` : null }).filter(Boolean).join(' · ') || '—'
   return <>
+    <ListaOficio />
     {p && <Preliminar preliminar={p.preliminar} rotulos={p.rotulos_definitivos} />}
     <FiltrosTecnicos f={f} mudar={mudar} />
     <form className="filtros-analise" onSubmit={(e) => { e.preventDefault(); mudar({ ...f, ip: rotuloIp.trim() || undefined, conta: rotuloConta.trim() || undefined }) }}>
@@ -324,10 +331,11 @@ export function Eventos({ d }: { d: Detalhe }) {
           <span className="secundario">{e.instancia}/{e.realm} · {e.aplicacao ?? '—'} · {e.conta ?? '—'} · {e.ip ?? '—'}</span></li>)}</ul>
           : <div className="br-table tabela-rolavel" tabIndex={0} role="region" aria-label="Eventos">
             <table className={`tabela-eventos${compacta ? ' compacta' : ''}`}>
-              <thead><tr>{visiveis.map((c) => <th key={c.id} scope="col">{c.rotulo}</th>)}<th scope="col"><span className="sr-only">Detalhe</span></th></tr></thead>
+              <thead><tr>{visiveis.map((c) => <th key={c.id} scope="col">{c.rotulo}</th>)}{comRevelados && <th scope="col">Valor revelado</th>}<th scope="col"><span className="sr-only">Detalhe</span></th></tr></thead>
               <tbody>{p.itens.map((e) => <tr key={e.ref} className={sel === e.ref ? 'selecionada' : undefined}>
                 {visiveis.map((c) => <td key={c.id} className={c.id === 'horario' ? 'mono' : undefined}>
                   {c.id === 'horario' ? dataHora(e.horario, fuso) : String(e[c.id] ?? '—')}</td>)}
+                {comRevelados && <td className="valor-revelado">{valoresDa(e)}</td>}
                 <td><button type="button" className="br-button small tertiary" aria-expanded={sel === e.ref}
                   onClick={() => setSel(sel === e.ref ? null : e.ref)}>Detalhe<span className="sr-only"> do evento de {dataHora(e.horario, fuso)}</span></button></td>
               </tr>)}</tbody>
@@ -357,7 +365,9 @@ function PainelEvento({ id, ref_, fuso, aoFechar }: { id: number; ref_: string; 
           <dt>Tipo</dt><dd>{e.tipo_nome} <span className="mono">({e.tipo})</span></dd>
           <dt>Resultado</dt><dd>{e.resultado}</dd>
           <dt>Onde</dt><dd>{e.instancia}/{e.realm} · {e.aplicacao ?? '—'}</dd>
-          <dt>Conta</dt><dd>{e.conta ?? '—'}</dd><dt>IP</dt><dd>{e.ip ?? '—'}</dd><dt>Sessão</dt><dd>{e.sessao ?? '—'}</dd>
+          <dt>Conta</dt><dd>{e.conta ?? '—'} <Revelar classe="conta" rotulo={e.conta} curto /></dd>
+          <dt>IP</dt><dd>{e.ip ?? '—'} <Revelar classe="ip" rotulo={e.ip} curto /> <AdicionarOficio rotulo={e.ip} /></dd>
+          <dt>Sessão</dt><dd>{e.sessao ?? '—'} <Revelar classe="sessao" rotulo={e.sessao} curto /></dd>
           <dt>ID do evento</dt><dd className="mono">{e.evento_id}</dd>
         </dl>
         <h3>Prova</h3>
@@ -371,9 +381,20 @@ function PainelEvento({ id, ref_, fuso, aoFechar }: { id: number; ref_: string; 
         </dl>
         <h3>Campos (pseudonimizados)</h3>
         <pre>{JSON.stringify(e.json, null, 2)}</pre>
+        <EventoRevelado ref_={ref_} />
       </>}
     </aside>
   )
+}
+
+function EventoRevelado({ ref_ }: { ref_: string }) {
+  const an = useAnalise()
+  if (!an?.habilitado) return null
+  const r = an.revelado('evento', ref_)
+  return <>
+    <h3>Evento completo (valores reais)</h3>
+    {r ? <pre className="valor-revelado">{JSON.stringify(r.valor, null, 2)}</pre> : <Revelar classe="evento" rotulo={ref_} />}
+  </>
 }
 
 // ------------------------------------------------------------------ Contas
@@ -434,7 +455,7 @@ function ContaLinha({ c, fuso, id, aberta, alternar, aoDecidir, preliminar }: { 
     varredura: 'varredura de falhas', realm: 'realm inteiro' }
   return <>
     <tr>
-      <th scope="row">{c.conta ?? '—'}{c.duplicidade && <span className="selo"> <Icone nome="fa-clone" /> duplicidade no realm</span>}</th>
+      <th scope="row">{c.conta ?? '—'} <Revelar classe="conta" rotulo={c.conta} curto />{c.duplicidade && <span className="selo"> <Icone nome="fa-clone" /> duplicidade no realm</span>}</th>
       <td>{c.instancia}/{c.realm}</td>
       <td>{VIA[c.via] ?? c.via}{c.origem ? ` · ${c.origem}` : ''}</td>
       <td>{c.incluida ? <span className="estado tom-verde"><Icone nome="fa-check" /> Incluída</span>

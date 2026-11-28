@@ -577,6 +577,50 @@ de 0,2 a 0,5 s; aceite das telas da W3 aprovado nos dois temas, com axe sem viol
 servidor; segundo teste com usuários (etapa D, com pessoas); rajadas em investigações com dezenas de milhares de
 falhas ainda são calculadas na hora (cerca de 0,5 s com 62 mil falhas).
 
+## Revelação e migração: etapa W4 (0.7.0)
+
+**Sessão de análise.** Para ver um valor real, o investigador designado inicia uma sessão de análise na investigação,
+com um motivo da lista (identificar autoria, confirmar titularidade, instruir ofício, verificar alteração, ou "outro",
+descrito, cifrado com a DEK) e autenticação recente. A sessão dura até 4 h, pode ser prorrogada duas vezes (+1 h cada) e
+tem teto de 8 h por usuário por dia (UTC). Ela expira no servidor e termina no logout, inclusive pelo canal de retorno
+do OIDC: depois disso a API não devolve nenhum valor real.
+
+**Revelação por item.** Dentro da sessão revela-se uma conta, um IP, uma sessão ou um evento completo. O valor aparece
+**ao lado** do pseudônimo (`IP 12 · 200.155.34.8 Revelado`), numa coluna "Valor revelado" em Eventos, no detalhe do
+evento e em Contas, com marca d'água (usuário e horário) enquanto houver valor na tela. Cada revelação vai para a trilha
+**pelo rótulo**, nunca pelo valor. No celular (< 768 px) a revelação fica desabilitada.
+
+**Cota e quatro olhos.** 30 itens por sessão e 100 por investigação; o 31º é bloqueado e a tela oferece "Pedir
+aprovação". Precisam de aprovação de outra pessoa: itens acima da cota (libera só os pedidos), dado de terceiro
+(o que só aparece na varredura de falhas sem conta), revelação total e lista para ofício. O aprovador vê quantidade,
+classe, motivos, fundamento e o histórico de revelações do investigador, nunca os valores.
+
+**Lista para ofício.** IPs juntados na tela ("Adicionar à lista para ofício"), enviados com motivo, fundamento e
+provedor; aprovados em bloco. Depois, só quem pediu baixa a tabela (XLSX, IP e horários em UTC), e cada IP entregue vai
+para a trilha. PDF fica para a W5.
+
+| Rota | O quê |
+| --- | --- |
+| `GET/POST /api/investigacoes/{id}/sessao-analise`, `.../prorrogar`, `.../encerrar` | estado (cota, revelados com valor só se ativa), início, prorrogação, fim |
+| `POST .../revelar` `{classe, rotulo}` | revela um item (rótulo do pseudônimo, ou a ref do evento) |
+| `POST .../pedidos-revelacao` `{tipo, itens, motivo, fundamento?, destinatario?}` | `revelacao_cota`, `revelacao_terceiro`, `revelacao_total`, `lista_oficio` |
+| `GET /api/aprovacoes/{pedido}` e `POST .../decidir` | o que o aprovador vê e a decisão (step-up) |
+| `GET .../oficios/{pedido}/tabela` | tabela do ofício (quem pediu, depois da aprovação) |
+
+**Migração das investigações existentes.** A cifra das investigações da CLI foi feita na W0b. A W4 acrescenta o
+critério probatório contra os **manifestos entregues**: `python -m auditor conferir-migracao [--pasta saida]` acha cada
+pacote em disco, localiza a exportação na trilha pelo `sha256_manifesto` e recalcula `eventos.sha256` e
+`requisicoes.sha256` a partir das tabelas cifradas (algoritmo v1 para o coletor 0.1.x; o atual depois). Na stack de
+teste: 20 manifestos entregues, 2 v1 e 18 atuais, todos conferem; uma adulteração no banco é detectada.
+
+**Testes:** `tests/revelacao.py` (40 verificações: sessão, revelação, cota, aprovações, expiração no servidor, logout,
+teto diário, ofício, migração, varredura dos valores na trilha e nos logs) e `web/e2e/aceite_w4.spec.ts` (fluxo na
+tela, claro e escuro, axe).
+
+**Ficou para depois:** no modo vault, o `chaveiro` ainda não tem as regras das finalidades novas (revelação e decisão
+de pedidos de revelação), como já acontecia com as rotas da W2; o provedor (ASN) dos IPs da lista para ofício não é
+identificado; a tabela do ofício em PDF chega com o relatório PDF/A da W5.
+
 ## Acessos da stack de teste
 
 | O quê | Endereço | Usuário | Senha |

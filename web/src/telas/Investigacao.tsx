@@ -11,6 +11,7 @@ import { emColeta, indicador } from '../dominio/estados'
 import { data, dataHora, duracao, numero } from '../dominio/formato'
 import { useSessao } from '../sessao'
 import { useCarregar } from '../usar'
+import { ProvedorAnalise } from '../componentes/SessaoAnalise'
 import { Cobertura, Contas, Dashboard, Eventos, VisaoAgregada } from './Analise'
 import { TIPOS_PROCESSO } from './NovaSolicitacao'
 
@@ -72,10 +73,12 @@ export function Investigacao({ aba }: { aba: Aba }) {
       </header>
       {avisoNav && <Mensagem tipo="success" papel="status">{avisoNav}</Mensagem>}
       {aba === 'resumo' && <Resumo d={d} recarregar={recarregar} />}
-      {aba === 'dashboard' && <Dashboard d={d} />}
-      {aba === 'eventos' && <Eventos d={d} />}
-      {aba === 'contas' && <Contas d={d} />}
-      {aba === 'cobertura' && <Cobertura d={d} />}
+      {['dashboard', 'eventos', 'contas', 'cobertura'].includes(aba) && <ProvedorAnalise id={d.id} habilitado={Boolean(d.analise?.dados)}>
+        {aba === 'dashboard' && <Dashboard d={d} />}
+        {aba === 'eventos' && <Eventos d={d} />}
+        {aba === 'contas' && <Contas d={d} />}
+        {aba === 'cobertura' && <Cobertura d={d} />}
+      </ProvedorAnalise>}
       {aba === 'pacotes' && <Pacotes d={d} recarregar={recarregar} />}
       {aba === 'trilha' && <TrilhaInvestigacao id={d.id} />}
     </section>

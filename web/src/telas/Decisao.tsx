@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
+import * as R from '../api/revelacao'
 import { aprovacoes, decidirPacote, detalhe } from '../api/rotas'
 import type { Detalhe } from '../api/tipos'
 import { tomarRetomada } from '../armazenamento'
@@ -21,7 +22,14 @@ export function Decisao() {
   const tipo = sp.get('tipo') ?? 'investigacao'
   const t = TIPO_PEDIDO[tipo] ?? { rotulo: tipo, icone: 'fa-question' }
   usePagina(`Decisão · pedido ${pedido}`, [{ rotulo: 'Aprovações', rota: '/aprovacoes' }, { rotulo: `Pedido ${pedido}` }])
-  const { dados: d, erro, carregando, recarregar } = useCarregar((s) => detalhe(inv, s), [inv])
+  const revelacao = (R.TIPOS_REVELACAO as readonly string[]).includes(tipo)
+  const { dados: d, erro, carregando, recarregar } = useCarregar((s) => (revelacao ? Promise.resolve(null) : detalhe(inv, s)), [inv, revelacao])
+  if (revelacao) return (
+    <section className="decisao">
+      <Titulo><Icone nome={t.icone} /> {t.rotulo} · investigação {inv}</Titulo>
+      <DecisaoRevelacao pedido={pedido} />
+    </section>
+  )
 
   return (
     <section className="decisao">
@@ -136,6 +144,81 @@ function DecisaoPacote({ pedido, d }: { pedido: number; d: Detalhe }) {
               ajuda="Fica na trilha. O pacote sem máscara só pode ir para quem requisitou com fundamento." />
             <div className="acoes-botoes">
               <button type="submit" className="br-button primary"><Icone nome="fa-check" /> Aprovar pacote sem máscara</button>
+              <button type="button" className="br-button secondary perigo" onClick={() => decidir(false)}><Icone nome="fa-ban" /> Recusar</button>
+            </div>
+          </form>
+        )}
+      </div>
+    </section>
+  </>
+}
+
+const NOME_CLASSE: Record<string, string> = { conta: 'contas', ip: 'IPs', sessao: 'sessões', evento: 'eventos completos' }
+
+/** Pedido de revelação (acima da cota, de terceiro, total) ou lista para ofício (§4.4): quantidade, classe, motivos,
+ * fundamento e histórico do investigador. Nunca os valores. */
+function DecisaoRevelacao({ pedido }: { pedido: number }) {
+  const { dados: p, erro: erroCarga, carregando, recarregar } = useCarregar((s) => R.detalhePedido(pedido, s), [pedido])
+  const [motivo, setMotivo] = useState('')
+  const [erro, setErro] = useState<string | null>(null)
+  const [feito, setFeito] = useState<string | null>(null)
+  const [retomada] = useState(() => Boolean(tomarRetomada(location.pathname, (a) => a === `decidir_${pedido}`)))
+  if (carregando && !p) return <Esqueleto linhas={6} rotulo="Carregando o pedido" />
+  if (erroCarga || !p) return <ErroTela erro={erroCarga} tentar={recarregar} />
+  async function decidir(aprovar: boolean, e?: FormEvent) {
+    e?.preventDefault()
+    if (motivo.trim().length < 5) return setErro('Escreva o motivo da decisão (pelo menos 5 caracteres).')
+    if (pareceIdentificador(motivo)) return setErro('Não escreva CPF ou título no motivo.')
+    setErro(null)
+    try {
+      await R.decidir(pedido, aprovar, motivo)
+      setFeito(aprovar ? `${p!.nome[0].toUpperCase()}${p!.nome.slice(1)} aprovada.` : 'Pedido recusado.')
+    } catch (x) { setErro(textoErro(x)) }
+  }
+  const aguardando = p.status === 'aguardando'
+  return <>
+    <div className="grade-decisao">
+      <section className="br-card" aria-labelledby="t-rev">
+        <div className="card-header"><h2 id="t-rev">O que foi pedido</h2></div>
+        <div className="card-content">
+          <dl className="definicoes">
+            <dt>Investigador</dt><dd>{p.investigador ?? '—'}</dd>
+            <dt>Pedido em</dt><dd>{dataHora(p.criado_em)}</dd>
+            <dt>Quantidade</dt><dd>{p.tipo === 'revelacao_total' ? `todos os itens (${numero(p.volume_investigacao)} eventos na investigação)`
+              : `${numero(p.quantidade)} item(ns): ${Object.entries(p.por_classe).map(([k, v]) => `${v} ${NOME_CLASSE[k] ?? k}`).join(', ')}`}</dd>
+            {p.terceiros > 0 && <><dt>Dado de terceiro</dt><dd>{p.terceiros} item(ns) de outras pessoas (varredura de falhas)</dd></>}
+            <dt>Motivo do pedido</dt><dd>{p.motivo ?? '—'}</dd>
+            {p.motivo_sessao && <><dt>Motivo da sessão de análise</dt><dd>{p.motivo_sessao}</dd></>}
+            {p.fundamento && <><dt>Fundamento</dt><dd>{p.fundamento}</dd></>}
+            {p.destinatario && <><dt>Destinatário</dt><dd>{p.destinatario}</dd></>}
+            {p.rotulos.length > 0 && <><dt>Itens (pseudônimos)</dt><dd>{p.rotulos.join(', ')}</dd></>}
+          </dl>
+          {p.avisos.map((a) => <Mensagem key={a} tipo="warning">{a}</Mensagem>)}
+        </div>
+      </section>
+      <section className="br-card" aria-labelledby="t-hist">
+        <div className="card-header"><h2 id="t-hist">Revelações já feitas por este investigador nesta investigação</h2></div>
+        <div className="card-content">
+          {!p.historico.length ? <p>Nenhuma.</p> : <div className="br-table"><table>
+            <thead><tr><th scope="col">Classe</th><th scope="col" className="num">Quantidade</th><th scope="col" className="num">De terceiro</th>
+              <th scope="col">Motivos das sessões</th></tr></thead>
+            <tbody>{p.historico.map((h) => <tr key={h.classe}><td>{NOME_CLASSE[h.classe] ?? h.classe}</td><td className="num">{numero(h.n)}</td>
+              <td className="num">{numero(h.terceiros)}</td><td>{h.motivos.join(', ')}</td></tr>)}</tbody>
+          </table></div>}
+        </div>
+      </section>
+    </div>
+    <section className="br-card" aria-labelledby="t-decrev">
+      <div className="card-header"><h2 id="t-decrev">Decidir</h2></div>
+      <div className="card-content">
+        {retomada && !feito && <Mensagem tipo="info" papel="status">Identidade confirmada. Escreva o motivo e confirme de novo.</Mensagem>}
+        {feito ? <Mensagem tipo="success" papel="status">{feito} <Link to="/aprovacoes">Voltar à fila</Link></Mensagem>
+          : !aguardando ? <Mensagem tipo="info">Este pedido já foi decidido ({p.status}).</Mensagem> : (
+          <form onSubmit={(e) => decidir(true, e)} noValidate className="form-estreito">
+            <Area rotulo="Motivo da decisão" obrigatorio rows={3} value={motivo} onChange={(e) => setMotivo(e.target.value)} erro={erro}
+              ajuda="Fica na trilha. Você não vê os valores; o investigador só os vê enquanto a sessão de análise estiver ativa." />
+            <div className="acoes-botoes">
+              <button type="submit" className="br-button primary"><Icone nome="fa-check" /> Aprovar</button>
               <button type="button" className="br-button secondary perigo" onClick={() => decidir(false)}><Icone nome="fa-ban" /> Recusar</button>
             </div>
           </form>

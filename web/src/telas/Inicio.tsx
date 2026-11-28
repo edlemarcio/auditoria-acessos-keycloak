@@ -10,7 +10,8 @@ import { useSessao } from '../sessao'
 import { useCarregar } from '../usar'
 
 const TIPO_DECISAO: Record<string, string> = { investigacao: 'Pedido de investigação', pacote_sem_mascara: 'Pacote sem máscara',
-  preservacao_urgente: 'Preservação urgente' }
+  preservacao_urgente: 'Preservação urgente', revelacao_cota: 'Revelação acima da cota',
+  revelacao_terceiro: 'Revelação de dado de terceiro', revelacao_total: 'Revelação total', lista_oficio: 'Lista para ofício' }
 const ICONE_ALERTA: Record<string, string> = { instancia_fora: 'fa-plug', coleta_falhou: 'fa-exclamation-circle',
   papel_alterado: 'fa-user-shield', escalonamento: 'fa-level-up-alt', preservacao_expira: 'fa-hourglass-end' }
 
