@@ -523,6 +523,60 @@ Telas: Início por perfil, Investigações (visões, busca, filtros, paginação
 vivo (SSE), Aprovações e tela de decisão, Pacotes, Administração, Perfis e acessos, Trilha global, "Você não tem
 acesso" e os estados de tela do §7.12. Capturas (dados dos dublês) em [`capturas/w2/`](capturas/w2/).
 
+## Análise: etapa W3 (0.6.0)
+
+O investigador designado analisa a investigação nas abas **Dashboard**, **Eventos**, **Contas** e **Cobertura**; o
+solicitante vê a **visão agregada** no Resumo, sem IPs, contas nem pseudônimos. Os números vêm de agregados calculados
+pelo worker, e são os mesmos da planilha do pacote.
+
+**Agregados** (migrações 0011 e 0012): `agregado_hora` (hora UTC × instância × realm × aplicação × tipo × conta, com o
+primeiro e o último horário) e `agregado_ip` (por IP, com a marca de IP novo), mais `destaque`, `analise` e
+`conta_decisao`. O worker calcula no fechamento, no recálculo (job `recalcular`, ao incluir ou excluir uma conta) e,
+durante a coleta, no máximo a cada 30 s (números marcados como PRELIMINAR). Tudo sobre pseudônimos: nada é decifrado
+para calcular. Fora do expediente sai do agregado por hora (exato nos fusos de hora inteira, todos os brasileiros).
+
+**Rotas** (só do investigador designado; coleta lacrada responde 409):
+
+| Rota | O que devolve |
+| --- | --- |
+| `GET /api/investigacoes/{id}/dashboard` | KPIs, série por janela, por aplicação, mapa de calor, ranking de IPs e de aplicações, destaques (cada um com o filtro que abre os eventos), saúde da prova, selo de cobertura |
+| `GET .../eventos` | paginação por chave (`apos`), total e total com filtro; filtros técnicos e por rótulo (`ip=IP 3`, `conta=Conta 2`), `tipo=falhas`, `destaque=fora_expediente` |
+| `GET .../eventos/{ref}` | detalhe pela visão mascarada, folha Merkle, selo da fatia, requisição de origem (vai para a trilha) |
+| `GET .../contas`, `POST .../contas/{c}/excluir` e `/incluir` | contas com situação e motivo; justificativa obrigatória, cifrada com a DEK; recálculo com aviso na tela |
+| `GET .../contas/{c}/extras` | sessões ativas e alterações da conta (visão mascarada) |
+| `GET .../cobertura` | por realm: classe, faixas de período, motivo e ação recomendada |
+| `GET .../visao-agregada` | solicitante dono (depois da conclusão) e investigador |
+
+Filtros técnicos e rótulos de pseudônimo vão na URL; valores reais nunca. Buscar por valor real (IP, username) é
+revelação e fica para a W4.
+
+**RLS por designação.** `evento`, `conta`, `pseudonimo`, `conta_extra` e os agregados têm RLS para o papel `kc_api`: só
+aparecem as linhas das investigações em que o usuário está designado (investigador; para `conta` e `agregado_hora`,
+qualquer designação). A API define `kc_auditor.sub` em cada conexão a partir da sessão validada. Os papéis de serviço
+não são afetados. Para usar:
+
+```bash
+psql .../auditor -v senha_app="'...'" -v senha_api="'outra-senha'" -f infra/papeis.sql   # cria kc_api
+AUDITOR_DSN_API=postgresql://kc_api:outra-senha@localhost:5435/auditor python -m auditor api --porta 8000
+```
+
+Sem `AUDITOR_DSN_API`, a API continua com `AUDITOR_DSN` (sem a RLS como segunda barreira; a regra da API vale igual).
+
+**Testes:**
+
+```bash
+AUDITOR_DSN=<kc_auditor_app> python tests/analise.py        # 53 verificações: números = XLSX, perfis, RLS, eventos, contas
+AUDITOR_DSN=<kc_auditor_app> python tests/carga_analise.py  # 500 mil eventos sintéticos: dashboard e eventos < 2 s (p95)
+cd web && npm run e2e:aceite                                # W2 (180 dias pela web) e W3 (telas, claro e escuro, axe)
+```
+
+Resultados na stack de teste: `analise.py` 53/53; carga com 500 mil eventos, dashboard p95 de 0,8 a 1,8 s e eventos
+de 0,2 a 0,5 s; aceite das telas da W3 aprovado nos dois temas, com axe sem violações.
+
+**Ficou para depois:** sessão de análise e revelação (W4); dublês das rotas da W3 para os testes de acessibilidade sem
+servidor; segundo teste com usuários (etapa D, com pessoas); rajadas em investigações com dezenas de milhares de
+falhas ainda são calculadas na hora (cerca de 0,5 s com 62 mil falhas).
+
 ## Acessos da stack de teste
 
 | O quê | Endereço | Usuário | Senha |

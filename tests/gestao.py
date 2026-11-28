@@ -234,7 +234,9 @@ def main():
         m.garantir(u)
         m.mudar(u, revogar=m.papeis(u))
     subprocess.run(["fuser", "-k", f"{PORTA}/tcp"], capture_output=True)
-    procs = [subir("api", "api", "--porta", str(PORTA)), subir("worker", "worker", "--threads", "4")]
+    # a API do teste não vê o web/dist do repositório (o caso "sem web/dist" é conferido no passo 9)
+    procs = [subir("api", "api", "--porta", str(PORTA), AUDITOR_WEB_DIST=str(RAIZ / "logs" / "sem_web_dist")),
+             subir("worker", "worker", "--threads", "4")]
     try:
         for _ in range(60):
             try:

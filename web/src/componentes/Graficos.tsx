@@ -153,9 +153,11 @@ export function MapaCalor({ celulas, titulo }: { celulas: { dia_semana: number; 
           </table>}
         </div>
       ) : (
-        <div className="mapa-calor" role="grid" aria-label={`${titulo}: setas para percorrer`}>
-          <div role="row" className="mapa-linha mapa-cab"><span role="columnheader" />
-            {Array.from({ length: 24 }, (_, h) => <span key={h} role="columnheader" className="mapa-hora">{h % 3 === 0 ? `${h}h` : ''}</span>)}</div>
+        <div className="mapa-calor">
+        <div role="grid" aria-label={`${titulo}: setas para percorrer`}>
+          <div role="row" className="mapa-linha mapa-cab"><span role="columnheader"><span className="sr-only">Dia</span></span>
+            {Array.from({ length: 24 }, (_, h) => <span key={h} role="columnheader" className="mapa-hora">
+              <span className={h % 3 === 0 ? undefined : 'sr-only'}>{h}h</span></span>)}</div>
           {grade.map((linha, d) => <div key={d} role="row" className="mapa-linha">
             <span role="rowheader" className="mapa-dia">{DIAS[d]}</span>
             {linha.map((v, h) => {
@@ -175,6 +177,7 @@ export function MapaCalor({ celulas, titulo }: { celulas: { dia_semana: number; 
                 }} />
             })}
           </div>)}
+        </div>
           <p className="mapa-leitura" aria-live="polite">{foco ? `${DIAS_LONGOS[foco.d]}, ${foco.h}h: ${numero(grade[foco.d][foco.h])} logins` : ' '}</p>
         </div>
       )}
@@ -198,8 +201,8 @@ export function Barras({ titulo, itens, aoSelecionar, unidade = 'eventos' }: {
             <span className="barra-valor">{numero(it.valor)}{it.detalhe ? <small> · {it.detalhe}</small> : null}</span>
           </>
           return <li key={k}>{aoSelecionar
-            ? <button type="button" className="barra-linha" onClick={() => aoSelecionar(k)}
-              aria-label={`${it.rotulo}: ${numero(it.valor)} ${unidade}${it.detalhe ? `, ${it.detalhe}` : ''}. Ver eventos`}>{conteudo}</button>
+            ? <button type="button" className="barra-linha" onClick={() => aoSelecionar(k)}>{conteudo}
+              <span className="sr-only"> {unidade}; ver eventos</span></button>
             : <div className="barra-linha">{conteudo}</div>}</li>
         })}
       </ol>}

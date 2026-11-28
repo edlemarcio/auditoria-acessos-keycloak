@@ -209,7 +209,7 @@ export function Dashboard({ d }: { d: Detalhe }) {
         <MapaCalor titulo={`Logins por dia da semana e hora (${fuso})`} celulas={x.mapa_calor} />
         <section aria-labelledby="t-por-app">
           <h2 id="t-por-app">Por instância, realm e aplicação</h2>
-          <div className="br-table tabela-rolavel" tabIndex={0} role="region" aria-labelledby="t-por-app">
+          <div className="br-table tabela-rolavel" tabIndex={0} role="region" aria-label="Tabela por instância, realm e aplicação">
             <table>
               <thead><tr><th scope="col">Instância</th><th scope="col">Realm</th><th scope="col">Aplicação</th>
                 <th scope="col" className="num">Logins</th><th scope="col" className="num">Falhas</th><th scope="col" className="num">Eventos</th>
