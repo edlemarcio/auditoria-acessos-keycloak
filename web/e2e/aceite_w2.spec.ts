@@ -1,7 +1,4 @@
-import { expect, test, type Browser, type Page } from '@playwright/test'
-import { createHmac } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import path from 'node:path'
+import { expect, test } from '@playwright/test'
 import { semViolacoes } from './ajuda'
 
 /**
@@ -9,40 +6,7 @@ import { semViolacoes } from './ajuda'
  * com três pessoas diferentes (solicitante1, aprovador1, investigador1), cada uma com login real (senha + OTP).
  * O CPF do alvo vem da massa de teste (dados/pessoas.json) e não pode aparecer em URL nem na tela depois de validado.
  */
-const RAIZ = path.resolve(import.meta.dirname, '../..')
-const SEGREDOS = JSON.parse(readFileSync(path.join(RAIZ, 'chaves/totp_teste.json'), 'utf8')) as Record<string, string>
-const CPF = (JSON.parse(readFileSync(path.join(RAIZ, 'dados/pessoas.json'), 'utf8')) as { casos: { ALVO: { cpf?: string } | string } }).casos.ALVO
-const cpf = typeof CPF === 'string' ? CPF : String(CPF.cpf)
-const digitos = cpf.replace(/\D/g, '')
-
-function totp(segredo: string, t = Date.now() / 1000): string {
-  const c = Buffer.alloc(8)
-  c.writeBigUInt64BE(BigInt(Math.floor(t / 30)))
-  const h = createHmac('sha1', Buffer.from(segredo, 'utf8')).update(c).digest()
-  const o = h[h.length - 1] & 0x0f
-  return String((h.readUInt32BE(o) & 0x7fffffff) % 1_000_000).padStart(6, '0')
-}
-
-async function login(browser: Browser, usuario: string, rota: string): Promise<Page> {
-  const page = await (await browser.newContext()).newPage()
-  page.on('request', (r) => { expect(r.url(), 'CPF em URL').not.toContain(digitos) })
-  await page.goto(rota)
-  await page.waitForURL(/localhost:8090\/realms\/auditor\//)
-  await page.locator('#username').fill(usuario)
-  await page.locator('#password').fill(`senha-${usuario}`)
-  await page.locator('#kc-login, input[type="submit"]').first().click()
-  for (let k = 0; k < 3; k++) {
-    await page.locator('input[name="otp"]').fill(totp(SEGREDOS[usuario]))
-    await page.locator('#kc-login, input[type="submit"]').first().click()
-    await page.waitForLoadState('domcontentloaded')
-    if (!(await page.locator('input[name="otp"]').isVisible().catch(() => false))) break
-    await page.waitForTimeout((31 - (Date.now() / 1000) % 30) * 1000)
-  }
-  await page.waitForURL((u) => u.host === 'localhost:8000')
-  await expect(page.locator('#titulo-tela')).toBeVisible()
-  await expect(page.locator('.esqueleto')).toHaveCount(0, { timeout: 15_000 })
-  return page
-}
+import { CPF as cpf, login } from './login_real'
 
 const iso = (d: Date) => d.toISOString().slice(0, 10)
 

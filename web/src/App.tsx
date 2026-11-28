@@ -21,6 +21,10 @@ export function Rotas() {
       <Route path="/" element={<Inicio />} />
       <Route path="/investigacoes" element={<Investigacoes />} />
       <Route path="/investigacoes/:id" element={<Investigacao aba="resumo" />} />
+      <Route path="/investigacoes/:id/dashboard" element={<Investigacao aba="dashboard" />} />
+      <Route path="/investigacoes/:id/eventos" element={<Investigacao aba="eventos" />} />
+      <Route path="/investigacoes/:id/contas" element={<Investigacao aba="contas" />} />
+      <Route path="/investigacoes/:id/cobertura" element={<Investigacao aba="cobertura" />} />
       <Route path="/investigacoes/:id/pacotes" element={<Investigacao aba="pacotes" />} />
       <Route path="/investigacoes/:id/trilha" element={<Investigacao aba="trilha" />} />
       <Route path="/nova" element={<NovaSolicitacao />} />

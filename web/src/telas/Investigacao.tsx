@@ -11,9 +11,10 @@ import { emColeta, indicador } from '../dominio/estados'
 import { data, dataHora, duracao, numero } from '../dominio/formato'
 import { useSessao } from '../sessao'
 import { useCarregar } from '../usar'
+import { Cobertura, Contas, Dashboard, Eventos, VisaoAgregada } from './Analise'
 import { TIPOS_PROCESSO } from './NovaSolicitacao'
 
-type Aba = 'resumo' | 'pacotes' | 'trilha'
+export type Aba = 'resumo' | 'dashboard' | 'eventos' | 'contas' | 'cobertura' | 'pacotes' | 'trilha'
 
 export function Investigacao({ aba }: { aba: Aba }) {
   const id = Number(useParams().id)
@@ -28,7 +29,8 @@ export function Investigacao({ aba }: { aba: Aba }) {
     const t = setInterval(recarregar, 3000)
     return () => clearInterval(t)
   }, [passagem, recarregar])
-  const nomeAba = { resumo: 'Resumo', pacotes: 'Pacotes', trilha: 'Trilha' }[aba]
+  const nomeAba = { resumo: 'Resumo', dashboard: 'Dashboard', eventos: 'Eventos', contas: 'Contas', cobertura: 'Cobertura',
+    pacotes: 'Pacotes', trilha: 'Trilha' }[aba]
   usePagina(`Investigação ${id} · ${nomeAba}`, [{ rotulo: 'Investigações', rota: '/investigacoes' },
     { rotulo: `nº ${id}`, rota: `/investigacoes/${id}` }, { rotulo: nomeAba }])
 
@@ -41,6 +43,9 @@ export function Investigacao({ aba }: { aba: Aba }) {
 
   const abas: { id: Aba; rotulo: string; rota: string }[] = [
     { id: 'resumo', rotulo: 'Resumo', rota: `/investigacoes/${id}` },
+    ...(d.analise?.dados ? (['dashboard', 'eventos', 'contas', 'cobertura'] as Aba[]).map((a) => ({ id: a,
+      rotulo: { dashboard: 'Dashboard', eventos: 'Eventos', contas: 'Contas', cobertura: 'Cobertura' }[a as 'dashboard'],
+      rota: `/investigacoes/${id}/${a}` })) : []),
     ...(tem('solicitante', 'investigador', 'auditor_interno') ? [{ id: 'pacotes' as Aba, rotulo: 'Pacotes', rota: `/investigacoes/${id}/pacotes` }] : []),
     ...(tem('auditor_interno') ? [{ id: 'trilha' as Aba, rotulo: 'Trilha', rota: `/investigacoes/${id}/trilha` }] : []),
   ]
@@ -67,6 +72,10 @@ export function Investigacao({ aba }: { aba: Aba }) {
       </header>
       {avisoNav && <Mensagem tipo="success" papel="status">{avisoNav}</Mensagem>}
       {aba === 'resumo' && <Resumo d={d} recarregar={recarregar} />}
+      {aba === 'dashboard' && <Dashboard d={d} />}
+      {aba === 'eventos' && <Eventos d={d} />}
+      {aba === 'contas' && <Contas d={d} />}
+      {aba === 'cobertura' && <Cobertura d={d} />}
       {aba === 'pacotes' && <Pacotes d={d} recarregar={recarregar} />}
       {aba === 'trilha' && <TrilhaInvestigacao id={d.id} />}
     </section>
@@ -93,6 +102,9 @@ function Resumo({ d, recarregar }: { d: Detalhe; recarregar: () => void }) {
       aoMudarStatus={(s) => { if (s !== d.status) recarregar() }} />}
     {indicador(d.status).preparando && <Mensagem tipo="info" papel="status">Preparando a coleta… as tarefas aparecem aqui em instantes.</Mensagem>}
 
+    {d.analise?.agregada && !d.analise.dados && <VisaoAgregada d={d} />}
+    {d.analise?.dados && <Mensagem tipo="info">Os números, eventos e contas estão nas abas <Link to={`/investigacoes/${d.id}/dashboard`}>Dashboard</Link>,
+      {' '}<Link to={`/investigacoes/${d.id}/eventos`}>Eventos</Link> e <Link to={`/investigacoes/${d.id}/contas`}>Contas</Link>.</Mensagem>}
     <div className="grade-resumo">
       <section className="br-card" aria-labelledby="t-pedido">
         <div className="card-header"><h2 id="t-pedido">Pedido</h2></div>

@@ -40,6 +40,8 @@ export interface Detalhe extends Investigacao {
   estimativa?: { tarefas: number; segundos: number } | null
   documento?: { nome: string; sha256: string; tamanho: number } | null
   preservacao?: { autorizada_em: string; escalona_em: string; destroi_em: string; prorrogada: boolean } | null
+  /** W3: dados = investigador designado pode abrir Dashboard/Eventos/Contas/Cobertura; agregada = visão agregada */
+  analise?: { dados: boolean; agregada: boolean } | null
 }
 
 export interface Pagina<T> { itens: T[]; total: number; pagina: number; por_pagina: number }

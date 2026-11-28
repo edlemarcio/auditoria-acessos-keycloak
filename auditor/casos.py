@@ -559,6 +559,11 @@ def ver(ator: Ator, inv_id: int) -> dict:
             if cofre is not None and "auditor_interno" not in ator.papeis:
                 nome = cofre.decifrar("documento", "meta", inv_id, d["meta_cifrado"])["nome"]
             v["documento"] = {"nome": nome, "sha256": d["sha256"], "tamanho": d["tamanho"]}
+        from . import analise
+        dados = (ator.tem("investigador") and "investigador" in f and i["status"] in analise.ESTADOS_COM_DADOS
+                 and not i["lacrada"])
+        v["analise"] = {"dados": dados, "agregada": dados or (
+            ator.tem("solicitante") and "solicitante" in f and i["status"] in analise.FINAIS and not i["lacrada"])}
         p = ctx.preservacao(inv_id)
         v["preservacao"] = {"autorizada_em": gestao.iso(p["autorizada_em"]), "escalona_em": gestao.iso(p["escalona_em"]),
                             "destroi_em": gestao.iso(p["destroi_em"]), "prorrogada": bool(p["prorrogada_em"]),

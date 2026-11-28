@@ -6,7 +6,7 @@ import { defineConfig, devices } from '@playwright/test'
  */
 export default defineConfig({
   testDir: 'e2e',
-  testMatch: ['aceite_w2.spec.ts'],
+  testMatch: ['aceite_w2.spec.ts', 'aceite_w3.spec.ts'],
   workers: 1,
   retries: 0,
   timeout: 900_000,

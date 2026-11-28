@@ -28,3 +28,10 @@ export function tomarRetomada(tela: string, aceitar: (acao: string) => boolean =
     return Date.now() - r.em < 10 * 60_000 ? r.acao : null
   }, null)
 }
+
+/** Preferências da tabela de eventos (W3): colunas visíveis e densidade. Sem dado pessoal. */
+const COLUNAS = 'kc-auditor:eventos-colunas'
+export interface PrefEventos { colunas: string[]; compacta: boolean }
+export const lerPrefEventos = (): PrefEventos | null =>
+  seguro(() => { const v = localStorage.getItem(COLUNAS); return v ? JSON.parse(v) as PrefEventos : null }, null)
+export const gravarPrefEventos = (p: PrefEventos) => seguro(() => localStorage.setItem(COLUNAS, JSON.stringify(p)), undefined)
