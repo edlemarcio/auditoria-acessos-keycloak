@@ -1,6 +1,7 @@
 """Banco do auditor (PostgreSQL)."""
 from __future__ import annotations
 
+import contextvars
 import os
 
 import psycopg
@@ -21,8 +22,19 @@ SNAPSHOTS_DA_INVESTIGACAO = """
 """
 
 
+# identidade do usuário da requisição atual (API): vai para kc_auditor.sub em cada conexão, e a RLS da migração 0011
+# (aplicada ao papel kc_api) só mostra eventos, contas e pseudônimos das investigações em que ele está designado.
+sub_atual: contextvars.ContextVar[str | None] = contextvars.ContextVar("sub_atual", default=None)
+
+
 def conectar(autocommit: bool = True) -> psycopg.Connection:
-    return psycopg.connect(DSN, autocommit=autocommit, row_factory=dict_row)
+    cx = psycopg.connect(DSN, autocommit=autocommit, row_factory=dict_row)
+    sub = sub_atual.get()
+    if sub:
+        cx.execute("SELECT set_config('kc_auditor.sub', %s, false)", (sub,))
+        if not autocommit:
+            cx.commit()
+    return cx
 
 
 def migrar_esquema(revisao: str = "head"):

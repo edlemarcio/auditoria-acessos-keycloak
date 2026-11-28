@@ -144,7 +144,17 @@ def _ator_da_sessao(request: Request) -> Ator | None:
     return Ator.de_claims(claims, "web", t["access_token"])
 
 
-def ator(request: Request) -> Ator:
+async def ator(request: Request) -> Ator:
+    """Dependência async de propósito: o contextvar com o usuário (db.sub_atual) definido aqui, no contexto da
+    requisição, chega às rotas síncronas que o FastAPI roda no threadpool (cópia do contexto em cada chamada)."""
+    from starlette.concurrency import run_in_threadpool
+    from . import db
+    a = await run_in_threadpool(_ator, request)
+    db.sub_atual.set(a.sub)
+    return a
+
+
+def _ator(request: Request) -> Ator:
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         tok = auth[7:].strip()
@@ -433,6 +443,69 @@ def r_acompanhamento(inv: int, a: Ator = Depends(ator)):
     return casos.acompanhamento(a, inv)
 
 
+# ------------------------------------------------------------------ análise (W3)
+def _q(request: Request) -> dict:
+    """Filtros da análise: técnicos (instancia, realm, cliente, categorias, tecnicos, tipo, resultado, de, ate,
+    destaque) e por rótulo de pseudônimo (conta, ip, sessao). Valores reais não são aceitos aqui."""
+    return {k: v for k, v in request.query_params.items()
+            if k in ("instancia", "realm", "cliente", "categorias", "tecnicos", "tipo", "resultado", "de", "ate",
+                     "destaque", "conta", "ip", "sessao", "apos", "limite")}
+
+
+@app.get("/api/investigacoes/{inv}/dashboard")
+def r_dashboard(inv: int, request: Request, a: Ator = Depends(ator)):
+    from . import casos_analise
+    return casos_analise.dashboard(a, inv, _q(request))
+
+
+@app.get("/api/investigacoes/{inv}/eventos")
+def r_eventos(inv: int, request: Request, a: Ator = Depends(ator)):
+    from . import casos_analise
+    return casos_analise.eventos(a, inv, _q(request))
+
+
+@app.get("/api/investigacoes/{inv}/eventos/{ref}")
+def r_evento(inv: int, ref: str, a: Ator = Depends(ator)):
+    from . import casos_analise
+    return casos_analise.evento(a, inv, ref)
+
+
+@app.get("/api/investigacoes/{inv}/contas")
+def r_contas(inv: int, a: Ator = Depends(ator)):
+    from . import casos_analise
+    return casos_analise.contas(a, inv)
+
+
+@app.get("/api/investigacoes/{inv}/contas/{conta}/extras")
+def r_contas_extras(inv: int, conta: int, a: Ator = Depends(ator)):
+    from . import casos_analise
+    return casos_analise.extras_conta(a, inv, conta)
+
+
+@app.post("/api/investigacoes/{inv}/contas/{conta}/excluir", status_code=202)
+def r_excluir_conta(inv: int, conta: int, d: Motivo, a: Ator = Depends(ator)):
+    from . import casos_analise
+    return casos_analise.decidir_conta(a, inv, conta, False, d.motivo)
+
+
+@app.post("/api/investigacoes/{inv}/contas/{conta}/incluir", status_code=202)
+def r_incluir_conta(inv: int, conta: int, d: Motivo, a: Ator = Depends(ator)):
+    from . import casos_analise
+    return casos_analise.decidir_conta(a, inv, conta, True, d.motivo)
+
+
+@app.get("/api/investigacoes/{inv}/cobertura")
+def r_cobertura(inv: int, a: Ator = Depends(ator)):
+    from . import casos_analise
+    return casos_analise.cobertura(a, inv)
+
+
+@app.get("/api/investigacoes/{inv}/visao-agregada")
+def r_visao_agregada(inv: int, a: Ator = Depends(ator)):
+    from . import casos_analise
+    return casos_analise.visao_agregada(a, inv)
+
+
 @app.get("/api/investigacoes/{inv}/acompanhamento/stream")
 def r_acompanhamento_stream(inv: int, request: Request, a: Ator = Depends(ator)):
     casos.abrir_acompanhamento(a, inv)
@@ -679,5 +752,9 @@ ROTAS_PUBLICAS = {"/saude", "/auth/entrar", "/auth/retorno", "/auth/logout-canal
 
 
 def servir(porta: int = 8000):
+    """Com AUDITOR_DSN_API, a API conecta com o papel kc_api (sujeito à RLS por designação, migração 0011)."""
     import uvicorn
+    from . import db
+    if os.environ.get("AUDITOR_DSN_API"):
+        db.DSN = os.environ["AUDITOR_DSN_API"]
     uvicorn.run(app, host="127.0.0.1", port=porta, log_level="warning")

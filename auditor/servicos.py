@@ -97,6 +97,8 @@ def fechar(inv_id: int) -> dict | None:
             from .pseudonimos import atribuir
             from .sigilo import Cofre
             r["pseudonimos"] = atribuir(cx, Cofre(inv_id, "fechar"))
+            from .analise import calcular
+            r["analise"] = calcular(cx, inv_id)   # agregados e destaques do dashboard (W3)
             cx.execute("UPDATE job SET status='concluido', atualizado=now() WHERE investigacao_id=%s "
                        "AND tipo='fechar' AND status='pendente'", (inv_id,))
             _avisar_fim(cx, inv_id, r["status"])
@@ -144,6 +146,13 @@ def executar_job(cx, j: dict):
             iniciar_coleta(j["investigacao_id"], "worker")
         elif j["tipo"] == "fechar":
             fechar(j["investigacao_id"])
+        elif j["tipo"] == "recalcular":   # inclusão/exclusão de conta (W3)
+            from .analise import calcular, pendente
+            calcular(cx, j["investigacao_id"])
+            for _ in range(5):   # pedido que chegou durante o cálculo (o job ativo impede um segundo job)
+                if not pendente(cx, j["investigacao_id"]):
+                    break
+                calcular(cx, j["investigacao_id"])
         elif j["tipo"] == "exportar":
             from .casos import gerar_pacote_job
             gerar_pacote_job(j["parametros"]["pacote"])
@@ -166,7 +175,7 @@ def worker(threads: int = 4, ocioso_s: float | None = None, parar: threading.Eve
     """Worker contínuo: jobs primeiro, depois tarefas de qualquer investigação em coleta (rodízio).
     Com `ocioso_s`, encerra quando passar esse tempo sem trabalho (testes e execuções pontuais).
     papel: todos (modo local) | coleta (jobs preparar/fechar e tarefas) | pacotes (só jobs exportar)."""
-    tipos = {"todos": None, "coleta": ("preparar", "fechar"), "pacotes": ("exportar",)}[papel]
+    tipos = {"todos": None, "coleta": ("preparar", "fechar", "recalcular"), "pacotes": ("exportar",)}[papel]
     parar = parar or threading.Event()
     feitas = [0]
     lock = threading.Lock()
@@ -192,6 +201,8 @@ def worker(threads: int = 4, ocioso_s: float | None = None, parar: threading.Eve
                             from .gestao import faxina as faxina_gestao
                             try:
                                 faxina_gestao(cx)
+                                from .analise import preliminar
+                                preliminar(cx)   # agregados preliminares das coletas em andamento (W3)
                             except Exception as e:  # noqa: BLE001  (tenta de novo no próximo ciclo)
                                 print(f"faxina: {redigir.erro(f'{type(e).__name__}: {e}')}", flush=True)
                         faxina = agora

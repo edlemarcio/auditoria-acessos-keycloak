@@ -10,6 +10,9 @@
 --   (o trigger da trilha também recusa UPDATE, DELETE e TRUNCATE de qualquer papel que não o desative)
 --   kc_chaveiro     (modo vault, W0b) só lê estado das investigações, jobs, DEKs envolvidas e segredos cifrados;
 --                   insere DEKs envolvidas e registros na trilha. Criado só quando senha_chaveiro é informada.
+--   kc_api          (W3) mesmos direitos de kc_auditor_app, mas sujeito à RLS por designação em evento, conta,
+--                   pseudonimo e conta_extra (migração 0011): a API define kc_auditor.sub a cada conexão.
+--                   Criado só quando senha_api é informada (-v senha_api="'...'"); a API usa AUDITOR_DSN_API.
 
 DO $$
 BEGIN
@@ -53,4 +56,24 @@ GRANT SELECT, INSERT ON chave_investigacao TO kc_chaveiro;
 GRANT INSERT ON trilha_auditoria TO kc_chaveiro;
 GRANT SELECT (cadeia, seq, hash) ON trilha_auditoria TO kc_chaveiro;   -- encadeamento (W0b)
 GRANT USAGE ON SEQUENCE trilha_auditoria_id_seq TO kc_chaveiro;
+\endif
+
+\if :{?senha_api}
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'kc_api') THEN
+    CREATE ROLE kc_api LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+  END IF;
+END $$;
+ALTER ROLE kc_api PASSWORD :senha_api;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM kc_api;
+GRANT CONNECT ON DATABASE :"DBNAME" TO kc_api;
+GRANT USAGE ON SCHEMA public TO kc_api;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO kc_api;
+REVOKE UPDATE, DELETE, TRUNCATE ON trilha_auditoria FROM kc_api;
+REVOKE UPDATE, DELETE, TRUNCATE ON selo FROM kc_api;
+REVOKE UPDATE, DELETE, TRUNCATE ON ancora FROM kc_api;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO kc_api;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kc_api;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO kc_api;
 \endif
