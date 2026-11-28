@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router'
-import { descartar, enviarDocumento, executar, pedirPacote, urlDocumento } from '../api/rotas'
+import { descartar, enviarDocumento, executar, pedirPacote, reexecutar, urlDocumento, urlRelatorioAgregado } from '../api/rotas'
 import type { Acao } from '../api/tipos'
 import { tomarRetomada } from '../armazenamento'
 import { pareceIdentificador } from '../dominio/documentos'
@@ -14,14 +14,18 @@ export const ROTULO: Record<Acao, string> = {
   recusar: 'Recusar', cancelar: 'Cancelar investigação', reenviar: 'Reenviar', autorizar_preservacao: 'Autorizar preservação urgente',
   prorrogar_preservacao: 'Prorrogar preservação', iniciar: 'Iniciar coleta', pausar: 'Pausar', retomar: 'Retomar',
   gerar_pacote: 'Gerar pacote mascarado', pedir_sem_mascara: 'Pedir pacote sem máscara', enviar_documento: 'Anexar documento de origem',
-  baixar_documento: 'Baixar documento de origem',
+  baixar_documento: 'Baixar documento de origem', reexecutar: 'Reexecutar', comparar: 'Comparar execuções',
+  relatorio_agregado: 'Baixar relatório agregado (PDF)',
 }
 const ICONE: Partial<Record<Acao, string>> = { aprovar: 'fa-check', recusar: 'fa-ban', devolver: 'fa-undo', iniciar: 'fa-play',
   pausar: 'fa-pause', retomar: 'fa-play', cancelar: 'fa-times', editar: 'fa-pencil-alt', enviar: 'fa-paper-plane',
-  baixar_documento: 'fa-download', gerar_pacote: 'fa-box', autorizar_preservacao: 'fa-lock' }
+  baixar_documento: 'fa-download', gerar_pacote: 'fa-box', autorizar_preservacao: 'fa-lock', reexecutar: 'fa-redo',
+  comparar: 'fa-columns', relatorio_agregado: 'fa-file-pdf' }
 const PRIMARIAS: Acao[] = ['aprovar', 'enviar', 'iniciar', 'retomar', 'reenviar', 'gerar_pacote']
 const DIRETAS: Acao[] = ['iniciar', 'pausar', 'retomar', 'gerar_pacote']
-const COM_MOTIVO: Acao[] = ['devolver', 'recusar', 'cancelar', 'reenviar', 'prorrogar_preservacao']
+const COM_MOTIVO: Acao[] = ['devolver', 'recusar', 'cancelar', 'reenviar', 'prorrogar_preservacao', 'reexecutar']
+/** ações que são links (download ou outra tela), não chamadas */
+const LINKS: Acao[] = ['baixar_documento', 'relatorio_agregado', 'comparar']
 const COM_INVESTIGADOR: Acao[] = ['aprovar', 'autorizar_preservacao']
 
 export interface AlvoAcoes { id: number; status: string; acoes: Acao[] }
@@ -77,9 +81,13 @@ export function AcoesInvestigacao({ inv, aoMudar, compacto, ocultar = [] }: { in
       {aviso && <div className="acoes-aviso" role={aviso.tipo === 'danger' ? 'alert' : 'status'}>
         <Mensagem tipo={aviso.tipo}>{aviso.texto}</Mensagem></div>}
       <div className="acoes-botoes" role="group" aria-label={`Ações da investigação ${inv.id}`}>
-        {visiveis.map((a) => a === 'baixar_documento'
-          ? <a key={a} className={`br-button secondary${compacto ? ' small' : ''}`} href={urlDocumento(inv.id)} download>
-              <i className="fas fa-download" aria-hidden="true" /> {ROTULO[a]}{compacto && <span className="sr-only"> da investigação {inv.id}</span>}</a>
+        {visiveis.map((a) => LINKS.includes(a)
+          ? <a key={a} className={`br-button secondary${compacto ? ' small' : ''}`}
+              href={a === 'baixar_documento' ? urlDocumento(inv.id) : a === 'relatorio_agregado' ? urlRelatorioAgregado(inv.id)
+                : `/investigacoes/${inv.id}/comparar`}
+              download={a === 'comparar' ? undefined : ''}
+              onClick={a === 'comparar' ? (e) => { e.preventDefault(); navegar(`/investigacoes/${inv.id}/comparar`) } : undefined}>
+              <i className={`fas ${ICONE[a]}`} aria-hidden="true" /> {ROTULO[a]}{compacto && <span className="sr-only"> da investigação {inv.id}</span>}</a>
           : <button key={a} type="button" disabled={ocupado}
               className={`br-button ${PRIMARIAS.includes(a) ? 'primary' : a === 'recusar' || a === 'descartar' ? 'secondary perigo' : 'secondary'}${compacto ? ' small' : ''}`}
               onClick={() => clicar(a)}>
@@ -88,13 +96,19 @@ export function AcoesInvestigacao({ inv, aoMudar, compacto, ocultar = [] }: { in
             </button>)}
       </div>
       {aberta && <DialogoAcao acao={aberta} inv={inv} retomada={retomada} ocupado={ocupado} aoFechar={() => setAberta(null)}
-        aoConfirmar={(f, msg) => rodar(aberta, f, msg)} aoDescartar={() => navegar('/investigacoes')} />}
+        aoConfirmar={(f, msg) => rodar(aberta, f, msg)} aoDescartar={() => navegar('/investigacoes')}
+        aoReexecutar={(r) => navegar(`/investigacoes/${r.investigacao}`, { state: { aviso: r.aprovacao
+          ? `Reexecução nº ${r.investigacao} criada: o período maior volta para aprovação.`
+          : `Reexecução nº ${r.investigacao} criada, já aprovada (mesmo escopo). Inicie a coleta quando quiser.` } })} />}
     </div>
   )
 }
 
-function DialogoAcao({ acao, inv, retomada, ocupado, aoFechar, aoConfirmar, aoDescartar }: { acao: Acao; inv: AlvoAcoes; retomada: boolean;
-  ocupado: boolean; aoFechar: () => void; aoConfirmar: (f: () => Promise<unknown>, msg: string) => Promise<void>; aoDescartar: () => void }) {
+function DialogoAcao({ acao, inv, retomada, ocupado, aoFechar, aoConfirmar, aoDescartar, aoReexecutar }: { acao: Acao; inv: AlvoAcoes;
+  retomada: boolean; ocupado: boolean; aoFechar: () => void; aoConfirmar: (f: () => Promise<unknown>, msg: string) => Promise<void>;
+  aoDescartar: () => void; aoReexecutar: (r: { investigacao: number; aprovacao: boolean }) => void }) {
+  const [novoDe, setNovoDe] = useState('')
+  const [novoAte, setNovoAte] = useState('')
   const [motivo, setMotivo] = useState('')
   const [investigador, setInvestigador] = useState('')
   const [sigilosa, setSigilosa] = useState(false)
@@ -134,6 +148,11 @@ function DialogoAcao({ acao, inv, retomada, ocupado, aoFechar, aoConfirmar, aoDe
       case 'enviar_documento': return void enviarComo(() => enviarDocumento(id, arquivo!), 'Documento de origem anexado.')
       case 'enviar': return void enviarComo(() => executar(id, 'enviar'), 'Pedido enviado para aprovação.')
       case 'descartar': return void aoConfirmar(() => descartar(id), 'Rascunho descartado.').then(aoDescartar).catch((er) => setErroServidor(textoErro(er)))
+      case 'reexecutar': {
+        let r: { investigacao: number; aprovacao: boolean } | undefined
+        return void aoConfirmar(async () => { r = await reexecutar(id, motivo, novoDe, novoAte) }, 'Reexecução criada.')
+          .then(() => r && aoReexecutar(r)).catch((er) => setErroServidor(textoErro(er)))
+      }
       default: return void enviarComo(() => executar(id, acao, { motivo }), `${ROTULO[acao]}: feito.`)
     }
   }
@@ -154,6 +173,17 @@ function DialogoAcao({ acao, inv, retomada, ocupado, aoFechar, aoConfirmar, aoDe
           tela de dados abre até a aprovação do pedido completo. Sem decisão, escalona ao coordenador em 3 dias úteis e destrói os dados em 5.</p>}
         {acao === 'enviar' && <p>O pedido segue para a fila de aprovação. Você acompanha o estado na tela da investigação.</p>}
         {acao === 'descartar' && <p>O rascunho será apagado. Esta ação não pode ser desfeita.</p>}
+        {acao === 'reexecutar' && <>
+          <p>Cria uma <strong>nova investigação vinculada</strong> a esta, que não é alterada. No mesmo escopo (repetir para
+            confirmar), a nova já nasce aprovada, com as mesmas designações. Com período maior, o pedido volta para aprovação.
+            Os pseudônimos são herdados: o mesmo IP continua sendo o mesmo “IP N”.</p>
+          <div className="linha-campos">
+            <Campo id="acao-de" type="date" rotulo="Novo início (opcional)" value={novoDe} onChange={(e) => setNovoDe(e.target.value)}
+              ajuda="Em branco: o mesmo início." />
+            <Campo id="acao-ate" type="date" rotulo="Novo fim (opcional)" value={novoAte} onChange={(e) => setNovoAte(e.target.value)}
+              ajuda="Em branco: o mesmo fim." />
+          </div>
+        </>}
         {COM_INVESTIGADOR.includes(acao) && <Campo id="acao-investigador" rotulo="Investigador designado (usuário)" obrigatorio
           value={investigador} onChange={(e) => setInvestigador(e.target.value)} erro={erros.investigador} autoComplete="off"
           ajuda="Precisa ser outra pessoa: solicitante, aprovador e investigador são diferentes na mesma investigação." />}

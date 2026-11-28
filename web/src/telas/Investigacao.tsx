@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link, NavLink, useLocation, useParams } from 'react-router'
 import { ErroApi } from '../api/cliente'
-import { detalhe, linkPacote, pacotes as buscarPacotes, trilhaGlobal, urlDocumento, verificarCadeia } from '../api/rotas'
-import type { Detalhe, Pacote } from '../api/tipos'
+import { comparacao, detalhe, linkPacote, pacotes as buscarPacotes, trilhaGlobal, urlDocumento, urlRelatorioAgregado,
+  verificarCadeia } from '../api/rotas'
+import type { Comparacao, Detalhe, ItemComparacao, Pacote } from '../api/tipos'
 import { AcoesInvestigacao } from '../componentes/AcoesInvestigacao'
 import { Acompanhamento } from '../componentes/Acompanhamento'
 import { ErroTela, Esqueleto, Icone, Indicador, Mensagem, textoErro, Vazio } from '../componentes/Estado'
@@ -14,8 +15,9 @@ import { useCarregar } from '../usar'
 import { ProvedorAnalise } from '../componentes/SessaoAnalise'
 import { Cobertura, Contas, Dashboard, Eventos, VisaoAgregada } from './Analise'
 import { TIPOS_PROCESSO } from './NovaSolicitacao'
+import { ResultadoVerif } from '../componentes/Verificacao'
 
-export type Aba = 'resumo' | 'dashboard' | 'eventos' | 'contas' | 'cobertura' | 'pacotes' | 'trilha'
+export type Aba = 'resumo' | 'dashboard' | 'eventos' | 'contas' | 'cobertura' | 'pacotes' | 'comparar' | 'trilha'
 
 export function Investigacao({ aba }: { aba: Aba }) {
   const id = Number(useParams().id)
@@ -31,7 +33,7 @@ export function Investigacao({ aba }: { aba: Aba }) {
     return () => clearInterval(t)
   }, [passagem, recarregar])
   const nomeAba = { resumo: 'Resumo', dashboard: 'Dashboard', eventos: 'Eventos', contas: 'Contas', cobertura: 'Cobertura',
-    pacotes: 'Pacotes', trilha: 'Trilha' }[aba]
+    pacotes: 'Pacotes', comparar: 'Comparar execuções', trilha: 'Trilha' }[aba]
   usePagina(`Investigação ${id} · ${nomeAba}`, [{ rotulo: 'Investigações', rota: '/investigacoes' },
     { rotulo: `nº ${id}`, rota: `/investigacoes/${id}` }, { rotulo: nomeAba }])
 
@@ -48,6 +50,7 @@ export function Investigacao({ aba }: { aba: Aba }) {
       rotulo: { dashboard: 'Dashboard', eventos: 'Eventos', contas: 'Contas', cobertura: 'Cobertura' }[a as 'dashboard'],
       rota: `/investigacoes/${id}/${a}` })) : []),
     ...(tem('solicitante', 'investigador', 'auditor_interno') ? [{ id: 'pacotes' as Aba, rotulo: 'Pacotes', rota: `/investigacoes/${id}/pacotes` }] : []),
+    ...(d.acoes.includes('comparar') ? [{ id: 'comparar' as Aba, rotulo: 'Comparar', rota: `/investigacoes/${id}/comparar` }] : []),
     ...(tem('auditor_interno') ? [{ id: 'trilha' as Aba, rotulo: 'Trilha', rota: `/investigacoes/${id}/trilha` }] : []),
   ]
 
@@ -80,6 +83,7 @@ export function Investigacao({ aba }: { aba: Aba }) {
         {aba === 'cobertura' && <Cobertura d={d} />}
       </ProvedorAnalise>}
       {aba === 'pacotes' && <Pacotes d={d} recarregar={recarregar} />}
+      {aba === 'comparar' && <Comparar d={d} />}
       {aba === 'trilha' && <TrilhaInvestigacao id={d.id} />}
     </section>
   )
@@ -91,7 +95,7 @@ function Resumo({ d, recarregar }: { d: Detalhe; recarregar: () => void }) {
   const devolucao = d.status === 'devolvida' ? [...d.linha_do_tempo].reverse().find((p) => p.status === 'devolvida') : undefined
   const tipoProc = TIPOS_PROCESSO.find((t) => t.id === d.tipo_processo)
   return <>
-    <AcoesInvestigacao inv={d} aoMudar={recarregar} />
+    <AcoesInvestigacao inv={d} aoMudar={recarregar} ocultar={['relatorio_agregado']} />
     {recusa && tem('solicitante') && <Mensagem tipo="danger" titulo="Pedido recusado.">
       Seu pedido foi recusado em {data(recusa.quando, d.fuso ?? undefined)}{recusa.por ? ` por ${recusa.por}` : ''}{recusa.motivo ? `: ${recusa.motivo}` : '.'}
       {' '}Você pode <Link to="/nova">abrir um novo pedido corrigido</Link>.</Mensagem>}
@@ -127,6 +131,10 @@ function Resumo({ d, recarregar }: { d: Detalhe; recarregar: () => void }) {
               <br /><span className="mono hash" title="SHA-256">SHA-256 {d.documento.sha256.slice(0, 16)}…</span>
               {d.acoes.includes('baixar_documento') && <> · <a href={urlDocumento(d.id)} download>Baixar</a></>}</dd></>}
             {d.estimativa && <><dt>Estimativa</dt><dd>{numero(d.estimativa.tarefas)} tarefas · {duracao(d.estimativa.segundos)}</dd></>}
+            {d.execucao_anterior && <><dt>Reexecução de</dt><dd><Link to={`/investigacoes/${d.execucao_anterior}`}>investigação nº {d.execucao_anterior}</Link>
+              {d.acoes.includes('comparar') && <> · <Link to={`/investigacoes/${d.id}/comparar`}>comparar execuções</Link></>}</dd></>}
+            {d.reexecucoes && d.reexecucoes.length > 0 && <><dt>Reexecuções</dt><dd>{d.reexecucoes.map((n, k) => <span key={n}>{k > 0 && ', '}
+              <Link to={`/investigacoes/${n}`}>nº {n}</Link></span>)}</dd></>}
             <dt>Criada em</dt><dd>{dataHora(d.criado_em, d.fuso ?? undefined)}</dd>
           </dl>
         </div>
@@ -174,7 +182,13 @@ const MAPA_ACAO: Record<string, string> = { pedir_investigacao: 'Pedido registra
 function Pacotes({ d, recarregar }: { d: Detalhe; recarregar: () => void }) {
   const { dados, erro, carregando, recarregar: recarregarLista } = useCarregar(() => buscarPacotes(d.id), [d.id])
   const [links, setLinks] = useState<Record<number, { link?: string; expira_em?: string; erro?: string }>>({})
-  const acoesPacote = d.acoes.filter((a) => a === 'gerar_pacote' || a === 'pedir_sem_mascara')
+  const acoesPacote = d.acoes.filter((a) => a === 'gerar_pacote' || a === 'pedir_sem_mascara' || a === 'relatorio_agregado')
+  const gerando = (dados ?? []).some((p) => p.status === 'gerando')
+  useEffect(() => {
+    if (!gerando) return
+    const t = setInterval(recarregarLista, 4000)
+    return () => clearInterval(t)
+  }, [gerando, recarregarLista])
   async function gerarLink(p: Pacote) {
     try { const r = await linkPacote(p.pacote); setLinks((l) => ({ ...l, [p.pacote]: r })) }
     catch (e) { setLinks((l) => ({ ...l, [p.pacote]: { erro: e instanceof ErroApi && e.status === 410 ? e.message : textoErro(e) } })) }
@@ -184,35 +198,121 @@ function Pacotes({ d, recarregar }: { d: Detalhe; recarregar: () => void }) {
   return <>
     <AcoesInvestigacao inv={{ ...d, acoes: acoesPacote }} aoMudar={() => { recarregar(); recarregarLista() }} />
     {carregando && !dados ? <Esqueleto linhas={3} rotulo="Carregando pacotes" /> : soInvestigador
-      ? <Mensagem tipo="info">Os pacotes desta investigação ficam com o investigador designado. O relatório agregado chega com o pacote v2 (W5).</Mensagem>
+      ? <Mensagem tipo="info">Os pacotes de evidência desta investigação ficam com o investigador designado.
+        {d.acoes.includes('relatorio_agregado') ? <> Para você, o <a href={urlRelatorioAgregado(d.id)} download>relatório agregado em PDF</a>:
+          estado, cobertura, totais e séries por dia e por aplicação, sem dados individuais.</>
+          : ' O relatório agregado fica disponível quando a coleta termina.'}</Mensagem>
       : erro ? <ErroTela erro={erro} tentar={recarregarLista} />
-      : !dados?.length ? <Vazio>Nenhum pacote gerado ainda.</Vazio> : (
+      : !dados?.length ? <Vazio>Nenhum pacote gerado ainda.</Vazio> : <>
+        <p className="secundario">Cada pacote é imutável e versionado. Logo depois de gerado, ele passa pelo verificador offline
+          (o mesmo que o perito usa: <code>kc-verificar</code>), que confere assinatura, carimbo do tempo, hashes, cadeia de custódia e
+          recalcula os resultados.</p>
         <div className="br-table tabela-rolavel" tabIndex={0} role="region" aria-label="Pacotes">
           <table>
-            <thead><tr><th scope="col">Pacote</th><th scope="col">Tipo</th><th scope="col">Estado</th><th scope="col">SHA-256</th>
+            <thead><tr><th scope="col">Pacote</th><th scope="col">Tipo</th><th scope="col">Estado</th><th scope="col">Verificação</th>
               <th scope="col">Criado</th><th scope="col">Download</th></tr></thead>
             <tbody>{dados.map((p) => {
               const l = links[p.pacote]
               return (
                 <tr key={p.pacote}>
-                  <td>{p.pacote}</td>
+                  <td><span className="mono">{p.nome ?? `pacote ${p.pacote}`}</span>
+                    {p.formato && <span className="secundario"> · formato {p.formato}{p.eventos != null ? ` · ${numero(p.eventos)} eventos` : ''}</span>}
+                    {p.manifesto_sha256 && <><br /><span className="mono hash" title="SHA-256 do manifesto">manifesto {p.manifesto_sha256.slice(0, 16)}…</span></>}</td>
                   <td>{p.sem_mascara ? <span className="estado tom-vermelho"><Icone nome="fa-eye" /> Sem máscara</span>
                     : <span className="estado tom-azul"><Icone nome="fa-mask" /> Mascarado</span>}</td>
-                  <td>{expirado(p) ? 'Expirado' : p.status}</td>
-                  <td className="mono hash">{p.sha256 ? `${p.sha256.slice(0, 16)}…` : '—'}</td>
+                  <td>{expirado(p) ? 'Expirado' : { pronto: 'Pronto', gerando: 'Gerando…', falhou: 'Falhou' }[p.status] ?? p.status}</td>
+                  <td className="celula-verificacao">{p.verificacao ? <ResultadoVerif r={p.verificacao} titulo={`Pacote ${p.nome ?? p.pacote}`} compacto />
+                    : p.status === 'pronto' ? <span className="secundario">Pacote de formato 1 (anterior à W5)</span> : '—'}</td>
                   <td>{dataHora(p.criado_em)}</td>
                   <td>{expirado(p) ? <span>O pacote sem máscara ficou disponível por 24 h e foi apagado. Peça novamente.</span>
-                    : l?.link ? <span><a className="br-button small primary" href={l.link} download>Baixar pacote {p.pacote}</a>
+                    : l?.link ? <span><a className="br-button small primary" href={l.link} download>Baixar {p.nome ?? `pacote ${p.pacote}`}</a>
                       <span className="secundario"> uso único, vale até {dataHora(l.expira_em)}</span></span>
                     : l?.erro ? <span role="alert">{l.erro}</span>
                     : p.status === 'pronto' || p.sha256 ? <button type="button" className="br-button small secondary" onClick={() => gerarLink(p)}>
-                      Gerar link de download<span className="sr-only"> do pacote {p.pacote}</span></button> : 'Gerando…'}</td>
+                      Gerar link de download<span className="sr-only"> do pacote {p.nome ?? p.pacote}</span></button>
+                    : p.status === 'falhou' ? 'Falhou' : 'Gerando…'}</td>
                 </tr>
               )
             })}</tbody>
           </table>
         </div>
-      )}
+      </>}
+  </>
+}
+
+function ListaComparacao({ titulo, id, itens, total, fuso, vazio }: { titulo: string; id: string; itens: ItemComparacao[]; total: number;
+  fuso?: string; vazio: string }) {
+  return (
+    <section className="br-card" aria-labelledby={id}>
+      <div className="card-header"><h2 id={id}>{titulo} <span className="secundario">({numero(total)})</span></h2></div>
+      <div className="card-content">
+        {!itens.length ? <Vazio>{vazio}</Vazio> : <>
+          {total > itens.length && <p className="secundario">Mostrando os {numero(itens.length)} primeiros de {numero(total)}.</p>}
+          <div className="br-table tabela-rolavel" tabIndex={0} role="region" aria-label={titulo}>
+            <table><thead><tr><th scope="col">Horário</th><th scope="col">Evento</th><th scope="col">Instância / realm</th>
+              <th scope="col">Conta</th><th scope="col">IP</th></tr></thead>
+              <tbody>{itens.map((e, k) => <tr key={k}><td>{dataHora(e.horario, fuso)}</td><td className="mono">{e.tipo}</td>
+                <td>{e.instancia} / {e.realm}</td><td>{e.conta}</td><td>{e.ip ?? '—'}</td></tr>)}</tbody></table>
+          </div>
+        </>}
+      </div>
+    </section>
+  )
+}
+
+/** Comparar execuções (§6.7): só rótulos herdados da execução de origem; IP 12 é o mesmo IP nas duas colunas. */
+function Comparar({ d }: { d: Detalhe }) {
+  const [recalc, setRecalc] = useState(0)
+  const { dados: c, erro, carregando } = useCarregar((s) => comparacao(d.id, recalc > 0, s), [d.id, recalc])
+  const fuso = d.fuso ?? undefined
+  if (carregando && !c) return <Esqueleto linhas={6} rotulo="Comparando as execuções" />
+  if (erro || !c) return <ErroTela erro={erro} tentar={() => setRecalc((n) => n + 1)} />
+  const t = c.totais
+  const cob = (x: Comparacao['cobertura']['antes']) => `realms ${x.realms[0]}/${x.realms[1]} · dias ${x.tempo[0]}/${x.tempo[1]}${x.completa ? ' (completa)' : ''}`
+  return <>
+    <p>Comparação com a <Link to={`/investigacoes/${c.anterior}`}>investigação nº {c.anterior}</Link> (execução de origem), no período comum
+      de {dataHora(c.periodo_comum.de, fuso)} a {dataHora(c.periodo_comum.ate, fuso)}. Os eventos são casados pelo id original;
+      os rótulos são os da execução de origem. Calculado em {dataHora(c.calculado_em, fuso)}.{' '}
+      <button type="button" className="br-button small secondary" onClick={() => setRecalc((n) => n + 1)}>Recalcular</button></p>
+    <div className="kpis" role="list" aria-label="Totais da comparação">
+      {[['Eventos na origem', t.anterior], ['Eventos nesta execução', t.atual], ['Novos no período comum', t.novos_no_periodo_comum],
+        ['Deixaram de existir', t.deixaram_de_existir], ['Conteúdo diferente', t.conteudo_diferente], ['Possível alteração', t.possivel_alteracao]]
+        .map(([r, v]) => <div key={r as string} className="kpi" role="listitem"><span className="kpi-rotulo">{r}</span>
+          <span className="kpi-valor">{numero(v as number)}</span></div>)}
+    </div>
+    {(t.deixaram_de_existir > 0 || t.conteudo_diferente > 0 || t.possivel_alteracao > 0) && <Mensagem tipo="warning">
+      Há eventos que deixaram de existir na origem (expirados pela retenção ou apagados) ou com conteúdo diferente entre as duas
+      leituras. Isso é um indício para análise, não uma conclusão: o Keycloak pode ter expirado os eventos pela retenção configurada.</Mensagem>}
+    <ListaComparacao titulo="Eventos novos no período comum" id="c-novos" itens={c.novos} total={t.novos_no_periodo_comum} fuso={fuso}
+      vazio="Nenhum evento novo no período comum." />
+    <ListaComparacao titulo="Eventos que deixaram de existir na origem" id="c-sumidos" itens={c.deixaram_de_existir}
+      total={t.deixaram_de_existir} fuso={fuso} vazio="Nenhum evento da execução de origem sumiu." />
+    <ListaComparacao titulo="Eventos com conteúdo diferente" id="c-dif" itens={c.conteudo_diferente} total={t.conteudo_diferente}
+      fuso={fuso} vazio="Nenhum evento com conteúdo diferente." />
+    {t.possivel_alteracao > 0 && <ListaComparacao titulo="Possível alteração (Keycloak 21 ou anterior)" id="c-pos"
+      itens={c.possivel_alteracao} total={t.possivel_alteracao} fuso={fuso} vazio="" />}
+    <div className="grade-resumo">
+      <section className="br-card" aria-labelledby="c-contas">
+        <div className="card-header"><h2 id="c-contas">Contas</h2></div>
+        <div className="card-content">
+          <dl className="definicoes">
+            <dt>Novas nesta execução</dt><dd>{c.contas.novas.length ? c.contas.novas.map((x) => `${x.conta} (${x.instancia}/${x.realm})`).join('; ') : 'nenhuma'}</dd>
+            <dt>Não encontradas nesta execução</dt><dd>{c.contas.nao_encontradas.length ? c.contas.nao_encontradas.map((x) => `${x.conta} (${x.instancia}/${x.realm})`).join('; ') : 'nenhuma'}</dd>
+            <dt>Inclusão mudou</dt><dd>{c.contas.inclusao_mudou.length ? c.contas.inclusao_mudou.map((x) => `${x.conta}: ${x.incluida ? 'incluída' : 'excluída'}`).join('; ') : 'nenhuma'}</dd>
+          </dl>
+        </div>
+      </section>
+      <section className="br-card" aria-labelledby="c-cob">
+        <div className="card-header"><h2 id="c-cob">Cobertura</h2></div>
+        <div className="card-content">
+          <dl className="definicoes">
+            <dt>Origem</dt><dd>{cob(c.cobertura.antes)}</dd>
+            <dt>Esta execução</dt><dd>{cob(c.cobertura.depois)}</dd>
+            <dt>Mudanças</dt><dd>{c.cobertura.mudancas.length ? c.cobertura.mudancas.map((m) => `${m.instancia}/${m.realm}: ${m.antes ?? '—'} → ${m.depois ?? '—'}`).join('; ') : 'nenhuma'}</dd>
+          </dl>
+        </div>
+      </section>
+    </div>
   </>
 }
 

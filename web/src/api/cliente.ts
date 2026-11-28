@@ -31,6 +31,7 @@ export function urlLogin(stepUp = false, volta = telaAtual()) {
 export const navegador = { ir(url: string) { window.location.assign(url) } }
 
 interface Opcoes { metodo?: 'GET' | 'POST' | 'PUT' | 'DELETE'; corpo?: unknown; form?: FormData; sinal?: AbortSignal;
+  /** corpo binário (upload em streaming) e cabeçalhos extras */ arquivo?: Blob; cabecalhos?: Record<string, string>;
   /** ação a retomar depois do step-up (só o nome; nada do que foi digitado) */ retomar?: string }
 
 async function lerErro(r: Response): Promise<ErroApi> {
@@ -43,12 +44,12 @@ async function lerErro(r: Response): Promise<ErroApi> {
 }
 
 export async function api<T = unknown>(caminho: string, o: Opcoes = {}): Promise<T> {
-  const metodo = o.metodo ?? (o.corpo !== undefined || o.form ? 'POST' : 'GET')
-  const h: Record<string, string> = { Accept: 'application/json' }
+  const metodo = o.metodo ?? (o.corpo !== undefined || o.form || o.arquivo ? 'POST' : 'GET')
+  const h: Record<string, string> = { Accept: 'application/json', ...(o.cabecalhos ?? {}) }
   if (metodo !== 'GET') h['X-Requisicao'] = 'kc-auditor'
   if (o.corpo !== undefined) h['Content-Type'] = 'application/json'
   const r = await fetch(caminho, { method: metodo, headers: h, credentials: 'same-origin', signal: o.sinal,
-    body: o.form ?? (o.corpo !== undefined ? JSON.stringify(o.corpo) : undefined) })
+    body: o.arquivo ?? o.form ?? (o.corpo !== undefined ? JSON.stringify(o.corpo) : undefined) })
   if (r.ok) {
     if (r.status === 204 || r.status === 202 && r.headers.get('content-length') === '0') return undefined as T
     const t = await r.text()

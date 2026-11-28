@@ -435,3 +435,19 @@ pre.valor-revelado { display: block; padding: 8px; white-space: pre-wrap; }
 @media (max-width: 767px) { .revelar { display: none; } }
 .lista-oficio { margin-bottom: 16px; }
 .marca-dagua span::after { content: attr(data-t); white-space: nowrap; }
+
+/* W5: resultado do verificador, pacotes v2, comparação de execuções e verificação pela web */
+.verificacao.compacto .br-message { margin: 0; }
+.verificacao.compacto .br-message .content { padding: 0.25rem 0.5rem; font-size: 0.875rem; }
+.detalhe-tecnico { margin-top: 0.5rem; }
+.detalhe-tecnico summary { cursor: pointer; color: var(--interactive, #1351b4); font-weight: 600; }
+.detalhe-tecnico summary:focus-visible { outline: 3px solid var(--focus, #c2850c); outline-offset: 2px; }
+.itens-verificacao { list-style: none; padding: 0; margin: 0.5rem 0; display: grid; gap: 0.25rem; }
+.itens-verificacao li { display: flex; gap: 0.5rem; align-items: baseline; color: var(--app-texto); }
+.itens-verificacao li i { flex: none; }
+.itens-verificacao li.tom-verde i { color: var(--tom-verde-bd); }
+.itens-verificacao li.tom-ambar i { color: var(--tom-ambar-bd); }
+.itens-verificacao li.tom-vermelho i { color: var(--tom-vermelho-bd); }
+.mono-dd dd { word-break: break-all; }
+.celula-verificacao { min-width: 18rem; max-width: 32rem; }
+.envio-arquivo { display: grid; gap: 0.75rem; max-width: 40rem; }

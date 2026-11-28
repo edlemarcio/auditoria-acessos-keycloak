@@ -4,7 +4,7 @@
  */
 import { api, postar } from './cliente'
 import type { Acompanhamento, Detalhe, Estimativa, Eu, Inicio, Instancia, Investigacao, ItemDecisao, Notificacao,
-  Pacote, Pagina, Perfil, RegistroTrilha, Saude } from './tipos'
+  Pacote, Pagina, Perfil, RegistroTrilha, Saude, Comparacao, Verificacao } from './tipos'
 
 type Bruto = Record<string, unknown>
 const iso = (ms: unknown) => (typeof ms === 'number' ? new Date(ms).toISOString() : undefined)
@@ -91,6 +91,15 @@ export const pacotes = (id: number) => api<Pacote[]>(`/api/investigacoes/${id}/p
 export const pedirPacote = (id: number, sem_mascara: boolean, destino?: string) =>
   postar<{ pacote?: number; pedido?: number; status: string }>(`/api/investigacoes/${id}/pacotes`, { sem_mascara, destino },
     `${sem_mascara ? 'pedir_sem_mascara' : 'gerar_pacote'}:${id}`)
+export const reexecutar = (id: number, motivo: string, de?: string, ate?: string) =>
+  postar<{ investigacao: number; anterior: number; status: string; aprovacao: boolean }>(`/api/investigacoes/${id}/reexecutar`,
+    { motivo, de: de || undefined, ate: ate || undefined }, `reexecutar:${id}`)
+export const comparacao = (id: number, recalcular = false, sinal?: AbortSignal) =>
+  api<Comparacao>(`/api/investigacoes/${id}/comparacao${recalcular ? '?recalcular=true' : ''}`, { sinal })
+export const urlRelatorioAgregado = (id: number) => `/api/investigacoes/${id}/relatorio-agregado`
+export const enviarVerificacao = (arquivo: File) =>
+  api<Verificacao>('/api/verificacoes', { arquivo, cabecalhos: { 'Content-Type': 'application/zip', 'X-Nome-Arquivo': arquivo.name } })
+export const verificacao = (id: number, sinal?: AbortSignal) => api<Verificacao>(`/api/verificacoes/${id}`, { sinal })
 export const linkPacote = (pacote: number) =>
   postar<{ link: string; expira_em: string }>(`/api/pacotes/${pacote}/link`, {}, 'link')
 
