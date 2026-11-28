@@ -233,6 +233,8 @@ def sair(request: Request, a: Ator = Depends(ator)):
     with conectar() as cx:
         cx.execute("UPDATE sessao_web SET encerrada_em=now() WHERE id_hash=%s", (hashlib.sha256(v.encode()).hexdigest(),))
         trilha(cx, a.sub, "logout", None, porta=a.porta)
+    from .revelacao import encerrar_do_usuario
+    encerrar_do_usuario(a.sub, "logout")   # o logout encerra as sessões de análise e as revelações (§8.9)
     r = JSONResponse({"saiu": True, "logout_idp": oidc.descoberta().get("end_session_endpoint")})
     r.delete_cookie(COOKIE, path="/")
     return r
@@ -249,8 +251,12 @@ async def logout_canal(request: Request):
     if "http://schemas.openid.net/event/backchannel-logout" not in (c.get("events") or {}):
         return Response(status_code=400)
     with conectar() as cx:
-        cx.execute("UPDATE sessao_web SET encerrada_em=now() WHERE encerrada_em IS NULL AND (sid=%s OR sub=%s)",
-                   (c.get("sid"), c.get("sub") if not c.get("sid") else None))
+        subs = {r["sub"] for r in cx.execute(
+            "UPDATE sessao_web SET encerrada_em=now() WHERE encerrada_em IS NULL AND (sid=%s OR sub=%s) RETURNING sub",
+            (c.get("sid"), c.get("sub") if not c.get("sid") else None))} | ({c["sub"]} if c.get("sub") else set())
+    from .revelacao import encerrar_do_usuario
+    for sub in subs:
+        encerrar_do_usuario(sub, "logout")
     return Response(status_code=200)
 
 
@@ -500,6 +506,69 @@ def r_cobertura(inv: int, a: Ator = Depends(ator)):
     return casos_analise.cobertura(a, inv)
 
 
+class InicioSessao(BaseModel):
+    motivo_codigo: str
+    motivo: str | None = None
+
+
+class Revelar(BaseModel):
+    classe: str
+    rotulo: str
+
+
+class PedidoRevelacao(BaseModel):
+    tipo: str
+    itens: list[dict] = []
+    motivo: str
+    fundamento: str | None = None
+    destinatario: str | None = None
+
+
+@app.get("/api/investigacoes/{inv}/sessao-analise")
+def r_sessao(inv: int, a: Ator = Depends(ator)):
+    from . import revelacao
+    return revelacao.estado(a, inv)
+
+
+@app.post("/api/investigacoes/{inv}/sessao-analise", status_code=201)
+def r_sessao_iniciar(inv: int, d: InicioSessao, a: Ator = Depends(ator)):
+    from . import revelacao
+    return revelacao.iniciar(a, inv, d.motivo_codigo, d.motivo)
+
+
+@app.post("/api/investigacoes/{inv}/sessao-analise/prorrogar")
+def r_sessao_prorrogar(inv: int, a: Ator = Depends(ator)):
+    from . import revelacao
+    return revelacao.prorrogar(a, inv)
+
+
+@app.post("/api/investigacoes/{inv}/sessao-analise/encerrar")
+def r_sessao_encerrar(inv: int, a: Ator = Depends(ator)):
+    from . import revelacao
+    return revelacao.encerrar(a, inv)
+
+
+@app.post("/api/investigacoes/{inv}/revelar")
+def r_revelar(inv: int, d: Revelar, a: Ator = Depends(ator)):
+    from . import revelacao
+    return revelacao.revelar(a, inv, d.classe, d.rotulo)
+
+
+@app.post("/api/investigacoes/{inv}/pedidos-revelacao", status_code=201)
+def r_pedir_revelacao(inv: int, d: PedidoRevelacao, a: Ator = Depends(ator)):
+    from . import revelacao
+    return revelacao.pedir(a, inv, d.tipo, d.itens, d.motivo, d.fundamento, d.destinatario)
+
+
+@app.get("/api/investigacoes/{inv}/oficios/{pedido}/tabela")
+def r_tabela_oficio(inv: int, pedido: int, a: Ator = Depends(ator)):
+    from . import revelacao
+    nome, dados = revelacao.tabela_oficio(a, inv, pedido)
+    return Response(dados, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{nome}"',
+                             "X-Conteudo-Sha256": hashlib.sha256(dados).hexdigest()})
+
+
 @app.get("/api/investigacoes/{inv}/visao-agregada")
 def r_visao_agregada(inv: int, a: Ator = Depends(ator)):
     from . import casos_analise
@@ -649,7 +718,19 @@ def r_aprovacoes(a: Ator = Depends(ator)):
 
 @app.post("/api/aprovacoes/{pedido}/decidir")
 def r_decidir(pedido: int, d: Decisao, a: Ator = Depends(ator)):
+    from . import revelacao
+    with conectar() as cx:
+        p = cx.execute("SELECT tipo FROM pedido WHERE id=%s", (pedido,)).fetchone()
+    if p and p["tipo"] in revelacao.TIPOS_PEDIDO:
+        return revelacao.decidir(a, pedido, d.aprovar, d.motivo)
     return casos.decidir_pacote(a, pedido, d.aprovar, d.motivo)
+
+
+@app.get("/api/aprovacoes/{pedido}")
+def r_pedido_revelacao(pedido: int, a: Ator = Depends(ator)):
+    """O que o aprovador vê para decidir um pedido de revelação ou lista para ofício (nunca os valores)."""
+    from . import revelacao
+    return revelacao.detalhe_pedido(a, pedido)
 
 
 @app.post("/api/pacotes/{pacote}/link")

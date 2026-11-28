@@ -45,10 +45,25 @@ def dashboard(ator: Ator, inv_id: int, q: dict) -> dict:
         return analise.dashboard(cx, i, q)
 
 
+def _com_revelados(ator: Ator, inv_id: int, linhas: list[dict]):
+    """Valor revelado ao lado do pseudônimo (nunca no lugar), só com sessão de análise ativa (§7.5)."""
+    from .revelacao import mapa_revelado
+    m = mapa_revelado(ator, inv_id)
+    if not m:
+        return False
+    for r in linhas:
+        rev = {campo: m[(campo, r.get(campo))] for campo in ("conta", "ip", "sessao") if (campo, r.get(campo)) in m}
+        if rev:
+            r["revelado"] = rev
+    return True
+
+
 def eventos(ator: Ator, inv_id: int, q: dict) -> dict:
     with conectar() as cx:
         i = _inv_investigador(cx, ator, inv_id)
-        return analise.eventos(cx, i, q)
+        p = analise.eventos(cx, i, q)
+    p["sessao_ativa"] = _com_revelados(ator, inv_id, p["itens"])
+    return p
 
 
 def evento(ator: Ator, inv_id: int, ref: str) -> dict:
@@ -65,7 +80,8 @@ def evento(ator: Ator, inv_id: int, ref: str) -> dict:
         if not d:
             raise Negado("inexistente", "Evento não encontrado nesta investigação", 404)
         trilha(cx, ator.username, "consultar_evento", inv_id, porta=ator.porta)
-        return d
+    _com_revelados(ator, inv_id, [d])
+    return d
 
 
 def contas(ator: Ator, inv_id: int) -> dict:
@@ -73,6 +89,7 @@ def contas(ator: Ator, inv_id: int) -> dict:
     with conectar() as cx:
         i = _inv_investigador(cx, ator, inv_id)
         cs = analise.contas(cx, i)
+        _com_revelados(ator, inv_id, cs)
         com_motivo = [c for c in cs if c["decisao"]]
         if com_motivo:
             with chaves.como_usuario(ator.token):

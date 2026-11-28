@@ -15,6 +15,7 @@
   python -m auditor chaveiro [--porta 8443]     porteiro das chaves no modo vault (CHAVEIRO_DSN, token do Vault)
   python -m auditor ancorar [--ate AAAA-MM-DD]  âncora diária das cadeias da trilha (o worker faz sozinho)
   python -m auditor verificar-cadeia [--id N]   confere as cadeias da trilha e as âncoras
+  python -m auditor conferir-migracao [--pasta saida]  manifestos entregues reproduzíveis a partir do cifrado (W4)
 
   python -m auditor api [--porta 8000]          API e BFF (W1)
 
@@ -241,6 +242,21 @@ def cmd_verificar_cadeia(a):
     sys.exit(0 if ok else 1)
 
 
+def cmd_conferir_migracao(a):
+    from . import conferir_migracao as cm
+    with conectar() as cx:
+        linhas = cm.conferir(cx, [Path(p) for p in a.pasta])
+    for x in linhas:
+        if x["resultado"] == "sem_registro":
+            continue
+        print(f"[{'ok' if x['resultado'] == 'confere' else 'DIVERGE'}] inv {x['investigacao']} ({x['algoritmo']}, coletor "
+              f"{x['versao']}) eventos {x['eventos'][0]}/{x['eventos'][1]} requisições {x['requisicoes'][0]}/"
+              f"{x['requisicoes'][1]} · {x['pacote']}")
+    r = cm.resumo(linhas)
+    print(json.dumps(r, ensure_ascii=False))
+    return 1 if r["v1"]["divergem"] or r["atual"]["divergem"] else 0
+
+
 def cmd_api(a):
     from .api import servir
     servir(a.porta)
@@ -309,6 +325,9 @@ def main():
                                                                                         action="store_true")
     p.set_defaults(f=cmd_verificar_cadeia)
     p = sp.add_parser("api"); p.add_argument("--porta", type=int, default=8000); p.set_defaults(f=cmd_api)
+    p = sp.add_parser("conferir-migracao"); p.add_argument("--pasta", action="append", default=None)
+    p.set_defaults(f=lambda a: cmd_conferir_migracao(a) if a.pasta else cmd_conferir_migracao(
+        argparse.Namespace(pasta=["saida"])))
     p = sp.add_parser("chaveiro"); p.add_argument("--porta", type=int, default=8443)
     p.add_argument("--certs", default="chaves/servicos"); p.set_defaults(f=cmd_chaveiro)
     a = ap.parse_args()

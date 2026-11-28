@@ -751,7 +751,9 @@ def aguardando_decisao(ator: Ator, cx=None) -> list[dict]:
                     "desde": gestao.iso(r["criado_em"]), "criado_em": gestao.iso(r["criado_em"]),
                     "prazo": gestao.iso(prazo), "escalonado": bool(r["escalonamento"] or (p and p["escalonada_em"])),
                     "lacrada": bool(p), **({"parametros": r["parametros"]} if r["tipo"] == "pacote_sem_mascara"
-                                           else {})})
+                                           else {}),
+                    **({"quantidade": len(r["parametros"].get("itens", []))} if r["tipo"] in (
+                        "revelacao_cota", "revelacao_terceiro", "revelacao_total", "lista_oficio") else {})})
     return out
 
 
